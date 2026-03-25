@@ -14,7 +14,31 @@ A [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server for ma
 - **Jump Host** — ProxyJump / bastion host support
 - **Zero Install** — Run directly with `npx`, no global installation needed
 
-## Quick Start
+## Installation
+
+### npx (No Install)
+
+```bash
+npx @nl4ever/sshmcp
+```
+
+### Global Install
+
+```bash
+npm install -g @nl4ever/sshmcp
+sshmcp
+```
+
+### From Source
+
+```bash
+git clone https://github.com/NikolaNddTesla/ssh-mcp-server.git
+cd ssh-mcp-server
+npm install && npm run build
+node dist/index.js
+```
+
+## Integration
 
 ### Claude Code
 
@@ -31,19 +55,52 @@ Add to your `claude_desktop_config.json`:
   "mcpServers": {
     "sshmcp": {
       "command": "npx",
-      "args": ["-y", "sshmcp"]
+      "args": ["-y", "@nl4ever/sshmcp"]
     }
   }
 }
 ```
 
-### Manual / Local Development
+### Cursor
 
-```bash
-git clone https://github.com/your-username/ssh-mcp-server.git
-cd ssh-mcp-server
-npm install && npm run build
-node dist/index.js
+Go to `Settings → MCP` and add:
+
+```json
+{
+  "mcpServers": {
+    "sshmcp": {
+      "command": "npx",
+      "args": ["-y", "@nl4ever/sshmcp"]
+    }
+  }
+}
+```
+
+### Windsurf / Cline / Other MCP Clients
+
+Any MCP-compatible client can use this server via stdio transport:
+
+```json
+{
+  "mcpServers": {
+    "sshmcp": {
+      "command": "npx",
+      "args": ["-y", "@nl4ever/sshmcp"]
+    }
+  }
+}
+```
+
+Or if installed globally:
+
+```json
+{
+  "mcpServers": {
+    "sshmcp": {
+      "command": "sshmcp"
+    }
+  }
+}
 ```
 
 ## Tools
