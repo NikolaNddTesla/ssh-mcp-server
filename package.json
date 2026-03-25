@@ -1,18 +1,35 @@
 {
   "name": "@nl4ever/sshmcp",
   "version": "0.1.1",
-  "description": "MCP server for SSH remote management with file transfer and per-connection SOCKS5 proxy support",
+  "description": "SSH MCP Server — Let AI manage remote servers via SSH with zero-token SFTP file transfer, proxy support, and multi-server management using Model Context Protocol",
   "keywords": [
     "mcp",
+    "mcp-server",
     "ssh",
+    "ssh-server",
     "sftp",
     "socks5",
     "proxy",
     "claude",
-    "model-context-protocol"
+    "claude-desktop",
+    "model-context-protocol",
+    "ai-assistant",
+    "remote-server",
+    "devops",
+    "automation",
+    "file-transfer",
+    "server-management"
   ],
-  "author": "",
+  "author": "NikolaNddTesla",
   "license": "MIT",
+  "homepage": "https://github.com/NikolaNddTesla/ssh-mcp-server#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/NikolaNddTesla/ssh-mcp-server.git"
+  },
+  "bugs": {
+    "url": "https://github.com/NikolaNddTesla/ssh-mcp-server/issues"
+  },
   "type": "module",
   "main": "dist/index.js",
   "bin": {
