@@ -1,6 +1,6 @@
 {
   "name": "@nl4ever/sshmcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "MCP server for SSH remote management with file transfer and per-connection SOCKS5 proxy support",
   "keywords": [
     "mcp",
@@ -16,7 +16,7 @@
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "ssh-mcp-server": "dist/index.js"
+    "sshmcp": "dist/index.js"
   },
   "files": [
     "dist"
