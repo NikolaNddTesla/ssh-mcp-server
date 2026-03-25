@@ -1,18 +1,65 @@
-# SSH MCP Server
+<p align="center">
+  <h1 align="center">SSH MCP Server</h1>
+  <p align="center">
+    <strong>Let AI manage your servers — with zero-token file transfers.</strong>
+  </p>
+  <p align="center">
+    <a href="https://www.npmjs.com/package/@nl4ever/sshmcp"><img src="https://img.shields.io/npm/v/@nl4ever/sshmcp?color=blue&label=npm" alt="npm version"></a>
+    <a href="https://www.npmjs.com/package/@nl4ever/sshmcp"><img src="https://img.shields.io/npm/dm/@nl4ever/sshmcp?color=green" alt="npm downloads"></a>
+    <a href="https://github.com/NikolaNddTesla/ssh-mcp-server/blob/main/LICENSE"><img src="https://img.shields.io/github/license/NikolaNddTesla/ssh-mcp-server" alt="license"></a>
+    <a href="https://modelcontextprotocol.io/"><img src="https://img.shields.io/badge/MCP-compatible-purple" alt="MCP compatible"></a>
+  </p>
+</p>
 
-A [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server for managing remote servers via SSH. Supports **file upload/download without consuming tokens**, multi-server management, and per-connection SOCKS proxy.
+---
 
-> Unlike other SSH MCP tools, file transfers go directly through SFTP — file contents never pass through the AI context window, so you can transfer files of **any size** at zero token cost.
+A [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that gives AI the power to manage remote servers via SSH — execute commands, transfer files, and manage multi-server environments with per-connection proxy support.
 
-## Features
+## Why This One?
 
-- **Command Execution** — Run shell commands on remote servers
-- **File Transfer** — Upload/download files and directories via SFTP (path-based, not through context)
-- **Multi-Server** — Manage multiple servers with persistent configuration
-- **SOCKS4/5 Proxy** — Per-connection proxy support for network-restricted environments
-- **Multiple Auth Methods** — Password, private key (file or inline), ssh-agent, keyboard-interactive (OTP/2FA)
-- **Jump Host** — ProxyJump / bastion host support
-- **Zero Install** — Run directly with `npx`, no global installation needed
+There are other SSH MCP servers out there. Here's what makes this one different:
+
+| | sshmcp | Others |
+|--|:------:|:------:|
+| Execute remote commands | Yes | Yes |
+| File upload / download | **Yes (SFTP)** | No |
+| File content passes through AI context? | **No** (zero token cost) | N/A |
+| Transfer files of any size? | **Yes** | No |
+| Per-connection SOCKS proxy | **Yes** | Some |
+| Multi-server management | **Yes** | Some |
+| Jump host / bastion support | **Yes** | Rare |
+| Persistent configuration | **Yes** | Some |
+
+> **The key difference:** File transfers go directly through SFTP between your machine and the server. The AI only sends a file path — **it never sees or processes the file content**. This means you can transfer a 10GB database dump at the same token cost as a 1KB config file: **near zero**.
+
+```
+You: "Deploy the build to production"
+
+AI:  upload_directory("./dist", "/var/www/app")  ← just the path
+                     |
+     MCP Server: local disk --SFTP--> remote server  ← direct transfer
+                     |
+AI:  "Deployed successfully (142 files, 38MB)"  ← only the result
+```
+
+## Quick Start
+
+**One command. No config files to edit.**
+
+```bash
+# Claude Code
+claude mcp add sshmcp npx -- -y @nl4ever/sshmcp
+
+# Or install globally first
+npm install -g @nl4ever/sshmcp
+claude mcp add sshmcp sshmcp
+```
+
+Then just tell Claude:
+
+> *"Connect to my server 192.168.1.100 as root and check disk usage"*
+
+Claude will call `add_server` + `connect` + `execute("df -h")` automatically.
 
 ## Installation
 
@@ -22,11 +69,10 @@ A [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server for ma
 npx @nl4ever/sshmcp
 ```
 
-### Global Install
+### Global Install (Recommended)
 
 ```bash
 npm install -g @nl4ever/sshmcp
-sshmcp
 ```
 
 ### From Source
@@ -40,15 +86,19 @@ node dist/index.js
 
 ## Integration
 
-### Claude Code
+<details>
+<summary><strong>Claude Code</strong></summary>
 
 ```bash
-claude mcp add sshmcp npx @nl4ever/sshmcp
+claude mcp add sshmcp sshmcp
 ```
 
-### Claude Desktop
+</details>
 
-Add to your `claude_desktop_config.json`:
+<details>
+<summary><strong>Claude Desktop</strong></summary>
+
+Add to `claude_desktop_config.json`:
 
 ```json
 {
@@ -61,9 +111,12 @@ Add to your `claude_desktop_config.json`:
 }
 ```
 
-### Cursor
+</details>
 
-Go to `Settings → MCP` and add:
+<details>
+<summary><strong>Cursor</strong></summary>
+
+Go to `Settings > MCP` and add:
 
 ```json
 {
@@ -76,7 +129,10 @@ Go to `Settings → MCP` and add:
 }
 ```
 
-### Windsurf / Cline / Other MCP Clients
+</details>
+
+<details>
+<summary><strong>Windsurf / Cline / Other MCP Clients</strong></summary>
 
 Any MCP-compatible client can use this server via stdio transport:
 
@@ -103,52 +159,52 @@ Or if installed globally:
 }
 ```
 
-## Tools
+</details>
 
-### Connection Management
+## What Can It Do?
 
-| Tool | Description |
+### 15 Tools at AI's Fingertips
+
+**Connection & Servers**
+| Tool | What it does |
 |------|-------------|
-| `list_servers` | List all configured servers |
-| `get_server` | View server configuration details (passwords masked) |
+| `connect` | Connect to a server |
+| `disconnect` | End current session |
+| `test_connection` | Test connectivity without switching active connection |
+| `list_servers` | Show all configured servers |
+| `get_server` | View server details (passwords auto-masked) |
 | `add_server` | Add or update a server |
 | `delete_server` | Remove a server |
-| `connect` | Connect to a server |
-| `disconnect` | Disconnect current session |
-| `test_connection` | Test connectivity without switching active connection |
 
-### Command Execution
-
-| Tool | Description |
+**Remote Execution**
+| Tool | What it does |
 |------|-------------|
-| `execute` | Run a shell command on the connected server (with configurable timeout) |
-
-### File Operations
-
-| Tool | Description |
-|------|-------------|
-| `upload_file` | Upload a local file to the remote server |
-| `upload_directory` | Recursively upload a local directory |
-| `download_file` | Download a remote file to local |
+| `execute` | Run any shell command (with configurable timeout) |
 | `write_file` | Write text content to a remote file |
 
-### Proxy Management
-
-| Tool | Description |
+**File Transfer (Zero Token Cost)**
+| Tool | What it does |
 |------|-------------|
-| `list_proxies` | List all configured SOCKS proxies |
-| `add_proxy` | Add or update a SOCKS4/5 proxy |
+| `upload_file` | Upload a local file to the server |
+| `upload_directory` | Recursively upload an entire directory |
+| `download_file` | Download a file from the server |
+
+**Proxy Management**
+| Tool | What it does |
+|------|-------------|
+| `list_proxies` | Show all configured SOCKS proxies |
+| `add_proxy` | Add a SOCKS4/5 proxy |
 | `delete_proxy` | Remove a proxy |
 
 ## Configuration
 
-All server and proxy configurations are stored persistently in `~/.ssh-mcp/config.json`. You only need to configure once — settings are preserved across sessions.
+All settings persist in `~/.ssh-mcp/config.json`. Configure once, use across all sessions.
 
-### Add a Server
+### Server with Password
 
 ```
 add_server({
-  server_id: "my-server",
+  server_id: "prod",
   name: "Production",
   host: "192.168.1.100",
   port: 22,
@@ -157,19 +213,11 @@ add_server({
 })
 ```
 
-### Add a Server with Proxy
+### Server with Proxy (for restricted networks)
 
 ```
-# First, add a proxy
-add_proxy({
-  proxy_id: "my-proxy",
-  name: "US Proxy",
-  host: "proxy.example.com",
-  port: 1080,
-  type: "5"
-})
+add_proxy({ proxy_id: "us", name: "US Proxy", host: "proxy.example.com", port: 1080 })
 
-# Then, add a server using that proxy
 add_server({
   server_id: "overseas",
   name: "Overseas Server",
@@ -177,41 +225,29 @@ add_server({
   port: 22,
   username: "root",
   password: "your-password",
-  proxy: "my-proxy"
+  proxy: "us"
 })
 ```
 
-### Authentication Methods
+### All Authentication Methods
 
-| Method | Parameter | Description |
-|--------|-----------|-------------|
-| Password | `password` | Simple password authentication |
-| Private Key File | `private_key` | Path to a local `.pem` / `id_rsa` file |
-| Private Key Inline | `private_key_content` | Paste the key content directly |
-| SSH Agent | `use_agent: true` | Use system ssh-agent (no password needed) |
-| Keyboard Interactive | `keyboard_interactive: true` | For OTP / 2FA prompts |
-| Jump Host | `jump_host` | Server ID of a bastion/jump server |
-
-## How File Transfer Works
-
-```
-AI says: "Upload C:/app/config.json to /etc/app/config.json"
-         |
-         v
-MCP Server reads local file --> SFTP --> Remote server
-         |
-         v
-AI receives: "Upload successful"
-```
-
-- File contents **never enter the AI context window**
-- Works with files of **any size**
-- Token cost: **near zero** (only the file path and result message)
+| Method | Parameter | Use Case |
+|--------|-----------|----------|
+| Password | `password` | Most common |
+| Private Key File | `private_key` | `.pem` / `id_rsa` on your machine |
+| Private Key Inline | `private_key_content` | Paste key directly (CI/CD friendly) |
+| SSH Agent | `use_agent: true` | Use system ssh-agent, no password needed |
+| Keyboard Interactive | `keyboard_interactive: true` | OTP / 2FA |
+| Jump Host | `jump_host` | Connect through a bastion server |
 
 ## Requirements
 
 - Node.js >= 18.0.0
 - SSH access to target servers
+
+## Contributing
+
+Issues and PRs are welcome! If you find a bug or have a feature request, please [open an issue](https://github.com/NikolaNddTesla/ssh-mcp-server/issues).
 
 ## License
 
