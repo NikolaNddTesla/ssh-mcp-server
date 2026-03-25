@@ -15,22 +15,19 @@
 
 A [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that gives AI the power to manage remote servers via SSH — execute commands, transfer files, and manage multi-server environments with per-connection proxy support.
 
-## Why This One?
+## Features
 
-There are other SSH MCP servers out there. Here's what makes this one different:
+- 🚀 **Remote Command Execution** — Run any shell command on your servers
+- 📦 **SFTP File Transfer** — Upload / download files and directories with zero token cost
+- 🌐 **Per-Connection SOCKS Proxy** — Route each server through its own SOCKS4/5 proxy
+- 🖥️ **Multi-Server Management** — Save and switch between unlimited server configs
+- 🔗 **Jump Host / Bastion Support** — Reach servers behind firewalls
+- 🔑 **Flexible Auth** — Password, private key, SSH agent, keyboard-interactive
+- 💾 **Persistent Configuration** — Configure once, use across all sessions
 
-| | sshmcp | Others |
-|--|:------:|:------:|
-| Execute remote commands | Yes | Yes |
-| File upload / download | **Yes (SFTP)** | No |
-| File content passes through AI context? | **No** (zero token cost) | N/A |
-| Transfer files of any size? | **Yes** | No |
-| Per-connection SOCKS proxy | **Yes** | Some |
-| Multi-server management | **Yes** | Some |
-| Jump host / bastion support | **Yes** | Rare |
-| Persistent configuration | **Yes** | Some |
+### Zero-Token File Transfer
 
-> **The key difference:** File transfers go directly through SFTP between your machine and the server. The AI only sends a file path — **it never sees or processes the file content**. This means you can transfer a 10GB database dump at the same token cost as a 1KB config file: **near zero**.
+File transfers go directly through SFTP between your machine and the server. The AI only sends a file path — **it never sees or processes the file content**. Transfer a 10GB database dump at the same token cost as a 1KB config file: **near zero**.
 
 ```
 You: "Deploy the build to production"
