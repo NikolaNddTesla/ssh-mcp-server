@@ -46,6 +46,19 @@ function text(t: string) {
   return { content: [{ type: 'text' as const, text: t }] };
 }
 
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+function formatElapsed(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
+  return `${Math.floor(ms / 60000)}m${Math.round((ms % 60000) / 1000)}s`;
+}
+
 // ── 连接管理 ──────────────────────────────────────────────
 
 server.tool('list_servers', '列出所有已配置的服务器', {}, async () => {
@@ -180,8 +193,8 @@ server.tool(
     const s = requireSsh();
     if (!fs.existsSync(local_path)) return text(`本地文件不存在: ${local_path}`);
     try {
-      await s.uploadFile(local_path, remote_path);
-      return text(`上传成功: ${local_path} → ${remote_path}`);
+      const r = await s.uploadFile(local_path, remote_path);
+      return text(`上传成功: ${local_path} → ${remote_path}\n${formatSize(r.bytes)}，耗时 ${formatElapsed(r.elapsed)}`);
     } catch (e) {
       return text(`上传失败: ${e}`);
     }
@@ -190,7 +203,7 @@ server.tool(
 
 server.tool(
   'upload_directory',
-  '递归上传本地目录到远程服务器',
+  '上传本地目录到远程服务器（自动压缩传输再解压，高效传输大量文件）',
   {
     local_path: z.string().describe('本地目录绝对路径'),
     remote_path: z.string().describe('远程目标路径'),
@@ -199,8 +212,8 @@ server.tool(
     const s = requireSsh();
     if (!fs.existsSync(local_path)) return text(`本地目录不存在: ${local_path}`);
     try {
-      await s.uploadDirectory(local_path, remote_path);
-      return text(`目录上传成功: ${local_path} → ${remote_path}`);
+      const r = await s.uploadDirectory(local_path, remote_path);
+      return text(`目录上传成功: ${local_path} → ${remote_path}\n${r.files} 个文件，压缩后 ${formatSize(r.bytes)}，耗时 ${formatElapsed(r.elapsed)}`);
     } catch (e) {
       return text(`目录上传失败: ${e}`);
     }
@@ -218,8 +231,8 @@ server.tool(
     const s = requireSsh();
     const savePath = local_path || path.basename(remote_path);
     try {
-      await s.downloadFile(remote_path, savePath);
-      return text(`下载成功: ${remote_path} → ${savePath}`);
+      const r = await s.downloadFile(remote_path, savePath);
+      return text(`下载成功: ${remote_path} → ${savePath}\n${formatSize(r.bytes)}，耗时 ${formatElapsed(r.elapsed)}`);
     } catch (e) {
       return text(`下载失败: ${e}`);
     }

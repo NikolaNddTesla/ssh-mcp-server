@@ -1,9 +1,17 @@
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
 import net from 'net';
+import { execSync } from 'child_process';
 import { Client, ConnectConfig, SFTPWrapper } from 'ssh2';
 import { SocksClient } from 'socks';
 import { ServerConfig, ProxyConfig } from './types.js';
+
+export interface TransferResult {
+  bytes: number;
+  files: number;
+  elapsed: number;  // ms
+}
 
 
 export class SshManager {
@@ -184,37 +192,90 @@ export class SshManager {
     });
   }
 
-  async uploadFile(localPath: string, remotePath: string): Promise<void> {
+  async uploadFile(localPath: string, remotePath: string): Promise<TransferResult> {
     const sftp = await this.getSftp();
+    const stat = fs.statSync(localPath);
+    const start = Date.now();
     await new Promise<void>((resolve, reject) => {
       sftp.fastPut(localPath, remotePath, (err) => (err ? reject(err) : resolve()));
     });
+    return { bytes: stat.size, files: 1, elapsed: Date.now() - start };
   }
 
-  async downloadFile(remotePath: string, localPath: string): Promise<void> {
+  async downloadFile(remotePath: string, localPath: string): Promise<TransferResult> {
     const sftp = await this.getSftp();
+    // 自动创建本地父目录
+    const dir = path.dirname(localPath);
+    if (dir && !fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+    const start = Date.now();
     await new Promise<void>((resolve, reject) => {
       sftp.fastGet(remotePath, localPath, (err) => (err ? reject(err) : resolve()));
     });
+    const stat = fs.statSync(localPath);
+    return { bytes: stat.size, files: 1, elapsed: Date.now() - start };
   }
 
-  async uploadDirectory(localDir: string, remoteDir: string): Promise<void> {
-    const sftp = await this.getSftp();
+  /**
+   * 上传目录：本地 tar.gz 压缩 → SFTP 上传 → 远程解压 → 清理临时文件
+   * 比逐文件上传快得多，尤其是大量小文件的场景。
+   */
+  async uploadDirectory(localDir: string, remoteDir: string): Promise<TransferResult> {
+    // 统计本地文件数
+    const fileCount = this.countFiles(localDir);
+    const start = Date.now();
 
-    await new Promise<void>((resolve) => {
-      sftp.mkdir(remoteDir, () => resolve());
-    });
+    // 1. 本地压缩为 tar.gz
+    const tmpName = `sshmcp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.tar.gz`;
+    const tmpLocal = path.join(os.tmpdir(), tmpName);
+    const remoteTar = `/tmp/${tmpName}`;
 
-    const entries = fs.readdirSync(localDir, { withFileTypes: true });
-    for (const entry of entries) {
-      const lp = path.join(localDir, entry.name);
-      const rp = `${remoteDir}/${entry.name}`;
-      if (entry.isDirectory()) {
-        await this.uploadDirectory(lp, rp);
-      } else {
-        await this.uploadFile(lp, rp);
+    try {
+      this.createTarGz(localDir, tmpLocal);
+      const tarSize = fs.statSync(tmpLocal).size;
+
+      // 2. SFTP 上传压缩包
+      const sftp = await this.getSftp();
+      await new Promise<void>((resolve, reject) => {
+        sftp.fastPut(tmpLocal, remoteTar, (err) => (err ? reject(err) : resolve()));
+      });
+
+      // 3. 远程解压
+      const { ok, stderr } = await this.execute(
+        `mkdir -p ${remoteDir} && tar -xzf ${remoteTar} -C ${remoteDir} && rm -f ${remoteTar}`,
+        120000,
+      );
+      if (!ok) {
+        // 解压失败，清理远程临时文件
+        await this.execute(`rm -f ${remoteTar}`, 5000).catch(() => {});
+        throw new Error(`远程解压失败: ${stderr}`);
       }
+
+      return { bytes: tarSize, files: fileCount, elapsed: Date.now() - start };
+    } finally {
+      // 清理本地临时文件
+      try { fs.unlinkSync(tmpLocal); } catch { /* ignore */ }
     }
+  }
+
+  /** 递归统计目录下的文件数量 */
+  private countFiles(dir: string): number {
+    let count = 0;
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    for (const e of entries) {
+      if (e.isDirectory()) count += this.countFiles(path.join(dir, e.name));
+      else count++;
+    }
+    return count;
+  }
+
+  /** 使用系统 tar 命令创建 tar.gz（跨平台：Unix tar / Windows tar） */
+  private createTarGz(sourceDir: string, outputPath: string): void {
+    // 使用 -C 切换到源目录内部，打包 '.' 使解压后内容直接铺开在目标目录
+    execSync(`tar -czf "${outputPath}" -C "${sourceDir}" .`, {
+      stdio: 'pipe',
+      timeout: 300000,  // 5 分钟超时
+    });
   }
 
   async writeFile(remotePath: string, content: string): Promise<void> {
