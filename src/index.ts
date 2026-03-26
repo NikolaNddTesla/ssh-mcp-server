@@ -116,6 +116,33 @@ server.tool(
   },
 );
 
+server.tool(
+  'quick_connect',
+  '临时连接服务器（不保存配置，用完即走）',
+  {
+    host: z.string().describe('IP 地址或域名'),
+    username: z.string().describe('SSH 用户名'),
+    port: z.number().int().default(22).describe('SSH 端口，默认 22'),
+    password: z.string().optional().describe('SSH 密码'),
+    private_key: z.string().optional().describe('私钥文件路径'),
+  },
+  async ({ host, username, port, password, private_key }) => {
+    const tmpServer = {
+      id: '_quick_', name: `${username}@${host}`,
+      host, port, username,
+      ...(password ? { password } : {}),
+      ...(private_key ? { privateKey: private_key } : {}),
+    };
+
+    await ssh.disconnect();
+    const ok = await ssh.connect(tmpServer);
+    if (!ok) return text(`连接失败: ${host}:${port}\n原因: ${ssh.lastError}`);
+
+    currentServerId = '_quick_';
+    return text(`已临时连接: ${username}@${host}:${port}（未保存配置）`);
+  },
+);
+
 server.tool('disconnect', '断开当前连接', {}, async () => {
   if (!ssh.isConnected()) return text('当前没有活跃连接');
   const id = currentServerId;
