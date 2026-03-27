@@ -6,7 +6,7 @@
 
 **[中文文档](./README.zh-CN.md)**
 
-**Let AI manage your remote servers.** A Model Context Protocol (MCP) server that gives AI assistants full SSH access — execute commands, transfer files, manage multiple servers, all through natural conversation.
+**Let AI manage your remote servers.** A Model Context Protocol (MCP) server that gives AI assistants full SSH access — execute commands, transfer files, manage multiple servers simultaneously, all through natural conversation.
 
 ```
 You:   "Deploy the latest build to production server"
@@ -16,14 +16,14 @@ AI:    connects → uploads build → restarts service → verifies status
 ## Features
 
 - **17 Tools** — Connect, execute, upload, download, write files, and more
+- **Connection Pool** — Operate multiple servers simultaneously, each command tagged with `server_id`
 - **Zero-Token File Transfer** — SFTP path-based transfer, file content never enters AI context
 - **Directory Upload** — Auto tar.gz compress → upload → remote decompress (fast for many small files)
 - **Async Transfer + Progress** — Background transfer for large files with real-time progress tracking
-- **Quick Connect** — Temporary connections without saving config (perfect for one-off tasks)
+- **Quick Connect** — Temporary connections without saving config, returns `host:port` as temp ID
 - **SOCKS4/5 Proxy** — Per-connection proxy support
 - **Jump Host** — SSH ProxyJump for bastion/gateway access
 - **Multi-Auth** — Password, private key, ssh-agent, keyboard-interactive (OTP/2FA)
-- **Multi-Server** — Manage unlimited servers with persistent config
 
 ## Quick Start
 
@@ -73,14 +73,14 @@ Go to Settings → MCP Servers → Add:
 
 | Tool | Description |
 |------|-------------|
-| `list_servers` | List all configured servers |
+| `list_servers` | List all configured servers and active connections |
 | `get_server` | View server config details |
 | `add_server` | Add/update server config (password, key, agent, OTP) |
 | `delete_server` | Remove a server |
-| `connect` | Connect to a configured server |
-| `quick_connect` | Temporary connection without saving config |
-| `disconnect` | Disconnect current session |
-| `test_connection` | Test connectivity without affecting current connection |
+| `connect` | Manually connect (usually not needed, tools auto-connect) |
+| `quick_connect` | Temporary connection, returns `host:port` as ID |
+| `disconnect` | Disconnect specific server or all connections |
+| `test_connection` | Test connectivity without affecting existing connections |
 
 ### Command Execution
 
@@ -106,12 +106,32 @@ Go to Settings → MCP Servers → Add:
 | `add_proxy` | Add SOCKS4/5 proxy preset |
 | `delete_proxy` | Remove a proxy preset |
 
+## Connection Pool: Multi-Server Operations
+
+All operation tools take a `server_id` parameter. The connection pool auto-manages connections — no manual connect/disconnect needed:
+
+```
+AI: execute(server_id="prod", command="nginx -s reload")         ← auto-connects to prod
+AI: execute(server_id="dev", command="tail -f /var/log/app.log") ← auto-connects to dev, prod stays
+AI: execute(server_id="prod", command="curl localhost")           ← reuses prod connection
+```
+
+For temporary servers, use `quick_connect` which returns `host:port` as the ID:
+
+```
+AI: quick_connect(host="1.2.3.4", username="root", password="***")
+→ "Connected: root@1.2.3.4:22, use server_id="1.2.3.4:22""
+
+AI: execute(server_id="1.2.3.4:22", command="df -h")
+AI: disconnect(server_id="1.2.3.4:22")
+```
+
 ## Async Transfer (Large Files)
 
 For large files, enable background transfer mode to avoid blocking:
 
 ```
-AI: upload_file("big.tar.gz", "/remote/path", async_transfer=true)
+AI: upload_file(server_id="prod", local_path="big.tar.gz", remote_path="/data/", async_transfer=true)
 → "Background upload started: tf_1"
 
 AI: transfer_status("tf_1")
@@ -129,8 +149,7 @@ Small files use synchronous mode by default — no config needed.
 
 ```
 AI: add_server(server_id="prod", name="Production", host="10.0.0.1", username="deploy", password="***")
-AI: connect("prod")
-AI: execute("systemctl status nginx")
+AI: execute(server_id="prod", command="systemctl status nginx")
 ```
 
 ### Private key authentication
@@ -143,8 +162,10 @@ AI: add_server(server_id="aws", name="AWS EC2", host="ec2-xx.compute.amazonaws.c
 
 ```
 AI: quick_connect(host="192.168.1.100", username="root", password="***")
-AI: execute("df -h")
-AI: disconnect()
+→ server_id="192.168.1.100:22"
+
+AI: execute(server_id="192.168.1.100:22", command="df -h")
+AI: disconnect(server_id="192.168.1.100:22")
 ```
 
 ### Via SOCKS5 proxy
