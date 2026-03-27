@@ -15,7 +15,7 @@ AI:    connects → uploads build → restarts service → verifies status
 
 ## Features
 
-- **17 Tools** — Connect, execute, upload, download, write files, and more
+- **21 Tools** — Connect, execute, upload, download, write files, and more
 - **Connection Pool** — Operate multiple servers simultaneously, each command tagged with `server_id`
 - **Zero-Token File Transfer** — SFTP path-based transfer, file content never enters AI context
 - **Directory Upload** — Auto tar.gz compress → upload → remote decompress (fast for many small files)
@@ -76,7 +76,9 @@ Go to Settings → MCP Servers → Add:
 | `list_servers` | List all configured servers and active connections |
 | `get_server` | View server config details |
 | `add_server` | Add/update server config (password, key, agent, OTP) |
+| `update_server` | Modify server config (only pass fields you want to change) |
 | `delete_server` | Remove a server |
+| `rename_server` | Rename a server ID |
 | `connect` | Manually connect (usually not needed, tools auto-connect) |
 | `quick_connect` | Temporary connection, returns `host:port` as ID |
 | `disconnect` | Disconnect specific server or all connections |
@@ -92,10 +94,12 @@ Go to Settings → MCP Servers → Add:
 
 | Tool | Description |
 |------|-------------|
+| `read_file` | Read remote file content (with optional line range) |
 | `write_file` | Write text content to remote file |
 | `upload_file` | Upload local file to remote (supports async mode) |
 | `upload_directory` | Upload directory with auto compress → transfer → decompress |
 | `download_file` | Download remote file to local (supports async mode) |
+| `download_directory` | Download directory with remote compress → transfer → local decompress |
 | `transfer_status` | Check progress of async transfers (size/speed/ETA) |
 
 ### Proxy Management

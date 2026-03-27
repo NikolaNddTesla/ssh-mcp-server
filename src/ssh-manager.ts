@@ -318,6 +318,68 @@ export class SshManager {
     });
   }
 
+  async readFile(remotePath: string, offset = 0, limit?: number): Promise<{ content: string; totalLines: number; readLines: number }> {
+    const sftp = await this.getSftp();
+    const data = await new Promise<string>((resolve, reject) => {
+      const chunks: Buffer[] = [];
+      const stream = sftp.createReadStream(remotePath, { encoding: 'utf-8' });
+      stream.on('data', (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
+      stream.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')));
+      stream.on('error', reject);
+    });
+    const allLines = data.split('\n');
+    const totalLines = allLines.length;
+    const sliced = limit ? allLines.slice(offset, offset + limit) : allLines.slice(offset);
+    return { content: sliced.join('\n'), totalLines, readLines: sliced.length };
+  }
+
+  async downloadDirectory(remotePath: string, localPath: string, onProgress?: OnProgress): Promise<TransferResult> {
+    const start = Date.now();
+    const tmpName = `sshmcp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.tar.gz`;
+    const remoteTar = `/tmp/${tmpName}`;
+    const tmpLocal = path.join(os.tmpdir(), tmpName);
+
+    try {
+      // 1. 远程压缩
+      const { ok, stderr } = await this.execute(
+        `tar -czf ${remoteTar} -C "${remotePath}" .`,
+        300000,
+      );
+      if (!ok) throw new Error(`远程压缩失败: ${stderr}`);
+
+      // 2. SFTP 下载压缩包
+      const sftp = await this.getSftp();
+      const remoteStat = await new Promise<{ size: number }>((resolve, reject) => {
+        sftp.stat(remoteTar, (err, stats) => (err ? reject(err) : resolve(stats)));
+      });
+      await new Promise<void>((resolve, reject) => {
+        sftp.fastGet(remoteTar, tmpLocal, {
+          step: onProgress ? (transferred: number, _chunk: number, total: number) => {
+            const elapsed = (Date.now() - start) / 1000;
+            onProgress({ transferred, total, speed: elapsed > 0 ? transferred / elapsed : 0, startTime: start });
+          } : undefined,
+        } as any, (err) => (err ? reject(err) : resolve()));
+      });
+
+      // 3. 清理远程临时文件
+      await this.execute(`rm -f ${remoteTar}`, 5000).catch(() => {});
+
+      // 4. 本地解压
+      if (!fs.existsSync(localPath)) fs.mkdirSync(localPath, { recursive: true });
+      execSync(`tar -xzf "${tmpLocal}" -C "${localPath}"`, {
+        stdio: 'pipe',
+        timeout: 300000,
+      });
+
+      // 统计文件数
+      const fileCount = this.countFiles(localPath);
+      const elapsed = Date.now() - start;
+      return { bytes: remoteStat.size, files: fileCount, elapsed, speed: elapsed > 0 ? remoteStat.size / (elapsed / 1000) : 0 };
+    } finally {
+      try { fs.unlinkSync(tmpLocal); } catch { /* ignore */ }
+    }
+  }
+
   async writeFile(remotePath: string, content: string): Promise<void> {
     const sftp = await this.getSftp();
     return new Promise((resolve, reject) => {

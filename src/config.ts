@@ -60,6 +60,32 @@ export class ConfigManager {
     this.save();
   }
 
+  updateServer(id: string, partial: Partial<Omit<ServerConfig, 'id'>>): boolean {
+    this.reload();
+    if (!this.config.servers[id]) return false;
+    this.config.servers[id] = { ...this.config.servers[id], ...partial };
+    // 删除值为 null 的字段（用于清除可选配置）
+    for (const [k, v] of Object.entries(this.config.servers[id])) {
+      if (v === null || v === undefined) delete (this.config.servers[id] as any)[k];
+    }
+    this.save();
+    return true;
+  }
+
+  renameServer(oldId: string, newId: string): boolean {
+    this.reload();
+    if (!this.config.servers[oldId]) return false;
+    if (this.config.servers[newId]) return false; // 新 ID 已存在
+    this.config.servers[newId] = this.config.servers[oldId];
+    delete this.config.servers[oldId];
+    // 更新引用了旧 ID 作为跳板机的服务器
+    for (const s of Object.values(this.config.servers)) {
+      if ((s as any).jumpHost === oldId) (s as any).jumpHost = newId;
+    }
+    this.save();
+    return true;
+  }
+
   deleteServer(id: string): boolean {
     this.reload();
     if (!this.config.servers[id]) return false;

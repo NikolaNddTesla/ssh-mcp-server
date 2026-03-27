@@ -15,7 +15,7 @@ AI：   连接 → 上传构建产物 → 重启服务 → 验证状态
 
 ## 特性
 
-- **17 个工具** — 连接、执行、上传、下载、写文件等一应俱全
+- **21 个工具** — 连接、执行、上传、下载、写文件等一应俱全
 - **连接池** — 同时操作多台服务器，每条指令带 `server_id`，AI 不再搞混当前连的是哪台
 - **零 Token 文件传输** — SFTP 路径直传，文件内容不经过 AI 上下文，不浪费 Token
 - **目录压缩上传** — 自动 tar.gz 压缩 → 上传 → 远程解压（大量小文件场景极快）
@@ -76,7 +76,9 @@ claude mcp add sshmcp sshmcp
 | `list_servers` | 列出所有已配置的服务器和活跃连接 |
 | `get_server` | 查看服务器配置详情 |
 | `add_server` | 添加/更新服务器（支持密码、密钥、agent、OTP） |
+| `update_server` | 修改服务器配置（只传要改的字段） |
 | `delete_server` | 删除服务器配置 |
+| `rename_server` | 重命名服务器 ID（别名） |
 | `connect` | 手动连接（通常不需要，操作工具会自动连接） |
 | `quick_connect` | 临时连接，不保存配置，返回 `host:port` 作为 ID |
 | `disconnect` | 断开指定服务器或全部连接 |
@@ -92,10 +94,12 @@ claude mcp add sshmcp sshmcp
 
 | 工具 | 说明 |
 |------|------|
+| `read_file` | 读取远程文件内容（支持行数限制） |
 | `write_file` | 将文本内容写入远程文件 |
 | `upload_file` | 上传本地文件到远程（支持异步模式） |
 | `upload_directory` | 上传目录，自动压缩 → 传输 → 解压 |
 | `download_file` | 下载远程文件到本地（支持异步模式） |
+| `download_directory` | 下载远程目录，远程压缩 → 传输 → 本地解压 |
 | `transfer_status` | 查看异步传输进度（大小/速度/预计时间） |
 
 ### 代理管理

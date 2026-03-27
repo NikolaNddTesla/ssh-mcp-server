@@ -302,6 +302,31 @@ server.tool(
 );
 
 server.tool(
+  'read_file',
+  '读取远程文件内容（支持行数限制，适合查看日志和配置文件）',
+  {
+    server_id: serverIdParam,
+    remote_path: z.string().describe('远程文件路径'),
+    offset: z.number().int().optional().default(0).describe('起始行号（从 0 开始），默认 0'),
+    limit: z.number().int().optional().describe('读取行数，留空则读取全部'),
+  },
+  async ({ server_id, remote_path, offset, limit }) => {
+    const r = await getConnection(server_id);
+    if ('error' in r) return text(r.error);
+    const { ssh, label } = r;
+    try {
+      const result = await ssh.readFile(remote_path, offset ?? 0, limit ?? undefined);
+      const info = limit
+        ? `${label}${remote_path} (第 ${offset + 1}-${offset + result.readLines} 行，共 ${result.totalLines} 行)`
+        : `${label}${remote_path} (共 ${result.totalLines} 行)`;
+      return text(`${info}\n${result.content}`);
+    } catch (e) {
+      return text(`${label}读取失败: ${e}`);
+    }
+  },
+);
+
+server.tool(
   'upload_file',
   '上传本地文件到远程服务器（路径直传，不占 Token。大文件可用 async 模式后台传输）',
   {
@@ -400,6 +425,39 @@ server.tool(
       return text(`${label}下载成功: ${remote_path} → ${savePath}\n${formatTransferResult(res)}`);
     } catch (e) {
       return text(`${label}下载失败: ${e}`);
+    }
+  },
+);
+
+server.tool(
+  'download_directory',
+  '下载远程目录到本地（远程压缩 → 下载 → 本地解压。大目录可用 async 模式）',
+  {
+    server_id: serverIdParam,
+    remote_path: z.string().describe('远程目录路径'),
+    local_path: z.string().describe('本地保存路径'),
+    async_transfer: z.boolean().optional().default(false).describe('大目录建议开启，后台传输并返回任务ID'),
+  },
+  async ({ server_id, remote_path, local_path, async_transfer }) => {
+    const r = await getConnection(server_id);
+    if ('error' in r) return text(r.error);
+    const { ssh, label } = r;
+
+    if (async_transfer) {
+      const id = newTransferId();
+      const task: TransferTask = { id, serverId: server_id, type: 'download', localPath: local_path, remotePath: remote_path, status: 'running', progress: null, result: null, error: null, startTime: Date.now() };
+      transfers.set(id, task);
+      ssh.downloadDirectory(remote_path, local_path, (p) => { task.progress = p; })
+        .then((res) => { task.status = 'done'; task.result = res; })
+        .catch((e) => { task.status = 'error'; task.error = String(e); });
+      return text(`${label}后台目录下载已启动: ${id}\n${remote_path} → ${local_path}\n用 transfer_status("${id}") 查看进度`);
+    }
+
+    try {
+      const res = await ssh.downloadDirectory(remote_path, local_path);
+      return text(`${label}目录下载成功: ${remote_path} → ${local_path}\n${formatTransferResult(res, `${res.files} 个文件`)}`);
+    } catch (e) {
+      return text(`${label}目录下载失败: ${e}`);
     }
   },
 );
@@ -504,6 +562,70 @@ server.tool(
 );
 
 server.tool(
+  'update_server',
+  '修改服务器配置（只传要改的字段，其余保持不变）',
+  {
+    server_id: z.string().describe('服务器ID'),
+    name: z.string().optional().describe('服务器名称'),
+    host: z.string().optional().describe('IP 地址或域名'),
+    port: z.number().int().optional().describe('SSH 端口'),
+    username: z.string().optional().describe('SSH 用户名'),
+    password: z.string().optional().describe('SSH 密码（传空字符串可清除）'),
+    private_key: z.string().optional().describe('私钥文件路径（传空字符串可清除）'),
+    private_key_content: z.string().optional().describe('私钥内容字符串（传空字符串可清除）'),
+    passphrase: z.string().optional().describe('私钥密码短语（传空字符串可清除）'),
+    use_agent: z.boolean().optional().describe('使用系统 ssh-agent'),
+    keyboard_interactive: z.boolean().optional().describe('启用键盘交互式认证'),
+    proxy: z.string().optional().describe('代理预设ID（传空字符串可清除）'),
+    jump_host: z.string().optional().describe('跳板机ID（传空字符串可清除）'),
+  },
+  async ({ server_id, name, host, port, username, password, private_key,
+    private_key_content, passphrase, use_agent, keyboard_interactive, proxy, jump_host }) => {
+
+    const existing = config.getServer(server_id);
+    if (!existing) return text(`服务器不存在: ${server_id}`);
+
+    if (proxy && proxy !== '' && !config.getProxy(proxy))
+      return text(`代理不存在: ${proxy}，请先用 add_proxy 添加。`);
+    if (jump_host && jump_host !== '' && !config.getServer(jump_host))
+      return text(`跳板机不存在: ${jump_host}，请先用 add_server 添加。`);
+    if (private_key && private_key !== '' && !fs.existsSync(private_key))
+      return text(`私钥文件不存在: ${private_key}`);
+
+    const updates: Record<string, any> = {};
+    if (name !== undefined) updates.name = name;
+    if (host !== undefined) updates.host = host;
+    if (port !== undefined) updates.port = port;
+    if (username !== undefined) updates.username = username;
+    if (password !== undefined) updates.password = password || null;
+    if (private_key_content !== undefined) updates.privateKeyContent = private_key_content || null;
+    if (private_key !== undefined) updates.privateKey = private_key || null;
+    if (passphrase !== undefined) updates.passphrase = passphrase || null;
+    if (use_agent !== undefined) updates.useAgent = use_agent || null;
+    if (keyboard_interactive !== undefined) updates.keyboardInteractive = keyboard_interactive || null;
+    if (proxy !== undefined) updates.proxy = proxy || null;
+    if (jump_host !== undefined) updates.jumpHost = jump_host || null;
+
+    config.updateServer(server_id, updates);
+
+    // 如果改了连接相关配置，断开旧连接让下次自动重连
+    const connFields = ['host', 'port', 'username', 'password', 'privateKey', 'privateKeyContent', 'passphrase', 'useAgent', 'keyboardInteractive', 'proxy', 'jumpHost'];
+    const changedConn = Object.keys(updates).some(k => connFields.includes(k));
+    if (changedConn) {
+      const ssh = pool.get(server_id);
+      if (ssh) { await ssh.disconnect(); pool.delete(server_id); }
+    }
+
+    const changed = Object.keys(updates).map(k => {
+      const v = updates[k];
+      if (k === 'password' || k === 'passphrase' || k === 'privateKeyContent') return v ? `${k}: ***` : `${k}: (已清除)`;
+      return v === null ? `${k}: (已清除)` : `${k}: ${v}`;
+    });
+    return text(`服务器已更新: ${server_id}\n修改: ${changed.join(', ')}${changedConn ? '\n（连接配置已变更，下次操作将自动重连）' : ''}`);
+  },
+);
+
+server.tool(
   'delete_server',
   '删除服务器配置',
   { server_id: z.string().describe('服务器ID') },
@@ -513,6 +635,31 @@ server.tool(
     if (ssh) { await ssh.disconnect(); pool.delete(server_id); }
     const ok = config.deleteServer(server_id);
     return text(ok ? `服务器已删除: ${server_id}` : `服务器不存在: ${server_id}`);
+  },
+);
+
+server.tool(
+  'rename_server',
+  '重命名服务器ID（别名）',
+  {
+    old_id: z.string().describe('当前服务器ID'),
+    new_id: z.string().describe('新的服务器ID'),
+  },
+  async ({ old_id, new_id }) => {
+    if (old_id === new_id) return text('新旧 ID 相同，无需修改');
+    // 连接池也要迁移
+    const ssh = pool.get(old_id);
+    if (ssh) {
+      pool.set(new_id, ssh);
+      pool.delete(old_id);
+    }
+    const ok = config.renameServer(old_id, new_id);
+    if (!ok) {
+      // 回滚连接池
+      if (ssh) { pool.set(old_id, ssh); pool.delete(new_id); }
+      return text(config.getServer(new_id) ? `新 ID 已被占用: ${new_id}` : `服务器不存在: ${old_id}`);
+    }
+    return text(`重命名成功: ${old_id} → ${new_id}`);
   },
 );
 
