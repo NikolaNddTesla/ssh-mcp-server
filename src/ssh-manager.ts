@@ -62,6 +62,16 @@ export class SshManager {
         c.connect(connectCfg);
       });
 
+      // 监听连接断开，自动清理状态
+      this.client!.on('close', () => {
+        this.sftp = null;
+        this.client = null;
+      });
+      this.client!.on('error', () => {
+        this.sftp = null;
+        this.client = null;
+      });
+
       return true;
     } catch (e) {
       this.lastError = e instanceof Error ? e.message : String(e);

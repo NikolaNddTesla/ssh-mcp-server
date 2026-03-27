@@ -19,16 +19,21 @@ const config = new ConfigManager(CONFIG_PATH);
 // key: server_id（已配置）或 "host:port"（临时）
 const pool = new Map<string, SshManager>();
 
-/** 获取或自动建立连接 */
+/** 获取或自动建立连接（断连自动重连） */
 async function getConnection(server_id: string): Promise<{ ssh: SshManager; label: string } | { error: string }> {
   // 已有活跃连接？直接复用
   const existing = pool.get(server_id);
   if (existing?.isConnected()) {
-    const s = config.getServer(server_id);
-    return { ssh: existing, label: s ? `[${server_id}] ` : `[${server_id}] ` };
+    return { ssh: existing, label: `[${server_id}] ` };
   }
 
-  // 尝试从配置自动连接
+  // 连接断了，清理旧实例
+  if (existing) {
+    await existing.disconnect().catch(() => {});
+    pool.delete(server_id);
+  }
+
+  // 尝试从配置自动连接（或重连）
   const s = config.getServer(server_id);
   if (!s) return { error: `服务器不存在且无活跃连接: ${server_id}\n请先用 add_server 添加，或用 quick_connect 临时连接。` };
 
@@ -40,7 +45,7 @@ async function getConnection(server_id: string): Promise<{ ssh: SshManager; labe
 
   const ssh = new SshManager();
   const ok = await ssh.connect(s, proxy, jump);
-  if (!ok) return { error: `自动连接失败: ${s.name} (${s.host}:${s.port})\n原因: ${ssh.lastError}` };
+  if (!ok) return { error: `连接失败: ${s.name} (${s.host}:${s.port})\n原因: ${ssh.lastError}` };
 
   pool.set(server_id, ssh);
   return { ssh, label: `[${server_id}] ` };
