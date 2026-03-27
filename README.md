@@ -4,6 +4,8 @@
 [![MCP Registry](https://img.shields.io/badge/MCP-Registry-blue)](https://registry.modelcontextprotocol.io)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
+**[中文文档](./README.zh-CN.md)**
+
 **Let AI manage your remote servers.** A Model Context Protocol (MCP) server that gives AI assistants full SSH access — execute commands, transfer files, manage multiple servers, all through natural conversation.
 
 ```
