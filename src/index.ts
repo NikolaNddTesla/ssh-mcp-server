@@ -6,7 +6,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import { ConfigManager } from './config.js';
-import { SshManager } from './ssh-manager.js';
+import { SshManager, TransferProgress, TransferResult } from './ssh-manager.js';
 
 // 配置文件存在用户目录，避免被 build 清掉
 const CONFIG_DIR = path.join(os.homedir(), '.ssh-mcp');
@@ -16,6 +16,26 @@ if (!fs.existsSync(CONFIG_DIR)) fs.mkdirSync(CONFIG_DIR, { recursive: true });
 const config = new ConfigManager(CONFIG_PATH);
 let ssh = new SshManager();
 let currentServerId: string | null = null;
+
+// ── 传输任务管理 ────────────────────────────────────────
+interface TransferTask {
+  id: string;
+  type: 'upload' | 'download' | 'upload_dir';
+  localPath: string;
+  remotePath: string;
+  status: 'running' | 'done' | 'error';
+  progress: TransferProgress | null;
+  result: TransferResult | null;
+  error: string | null;
+  startTime: number;
+}
+
+const transfers = new Map<string, TransferTask>();
+let transferCounter = 0;
+
+function newTransferId(): string {
+  return `tf_${++transferCounter}`;
+}
 
 const server = new McpServer({
   name: 'ssh-mcp-server',
@@ -57,6 +77,22 @@ function formatElapsed(ms: number): string {
   if (ms < 1000) return `${ms}ms`;
   if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
   return `${Math.floor(ms / 60000)}m${Math.round((ms % 60000) / 1000)}s`;
+}
+
+function formatSpeed(bytesPerSec: number): string {
+  return `${formatSize(bytesPerSec)}/s`;
+}
+
+function formatTransferResult(r: TransferResult, extra = ''): string {
+  const parts = [formatSize(r.bytes), `耗时 ${formatElapsed(r.elapsed)}`];
+  if (r.speed > 0) parts.push(formatSpeed(r.speed));
+  if (extra) parts.unshift(extra);
+  return parts.join('，');
+}
+
+function formatProgress(p: TransferProgress): string {
+  const pct = p.total > 0 ? ((p.transferred / p.total) * 100).toFixed(1) : '?';
+  return `${formatSize(p.transferred)} / ${formatSize(p.total)} (${pct}%) — ${formatSpeed(p.speed)}`;
 }
 
 // ── 连接管理 ──────────────────────────────────────────────
@@ -211,17 +247,30 @@ server.tool(
 
 server.tool(
   'upload_file',
-  '上传本地文件到远程服务器（路径直传，不占 Token）',
+  '上传本地文件到远程服务器（路径直传，不占 Token。大文件可用 async 模式后台传输）',
   {
     local_path: z.string().describe('本地文件绝对路径'),
     remote_path: z.string().describe('远程目标路径'),
+    async_transfer: z.boolean().optional().default(false).describe('大文件建议开启，后台传输并返回任务ID，用 transfer_status 查进度'),
   },
-  async ({ local_path, remote_path }) => {
+  async ({ local_path, remote_path, async_transfer }) => {
     const s = requireSsh();
     if (!fs.existsSync(local_path)) return text(`本地文件不存在: ${local_path}`);
+
+    if (async_transfer) {
+      const id = newTransferId();
+      const task: TransferTask = { id, type: 'upload', localPath: local_path, remotePath: remote_path, status: 'running', progress: null, result: null, error: null, startTime: Date.now() };
+      transfers.set(id, task);
+      s.uploadFile(local_path, remote_path, (p) => { task.progress = p; })
+        .then((r) => { task.status = 'done'; task.result = r; })
+        .catch((e) => { task.status = 'error'; task.error = String(e); });
+      const size = fs.statSync(local_path).size;
+      return text(`后台上传已启动: ${id}\n${local_path} → ${remote_path} (${formatSize(size)})\n用 transfer_status("${id}") 查看进度`);
+    }
+
     try {
       const r = await s.uploadFile(local_path, remote_path);
-      return text(`上传成功: ${local_path} → ${remote_path}\n${formatSize(r.bytes)}，耗时 ${formatElapsed(r.elapsed)}`);
+      return text(`上传成功: ${local_path} → ${remote_path}\n${formatTransferResult(r)}`);
     } catch (e) {
       return text(`上传失败: ${e}`);
     }
@@ -230,17 +279,29 @@ server.tool(
 
 server.tool(
   'upload_directory',
-  '上传本地目录到远程服务器（自动压缩传输再解压，高效传输大量文件）',
+  '上传本地目录到远程服务器（自动压缩传输再解压。大文件可用 async 模式）',
   {
     local_path: z.string().describe('本地目录绝对路径'),
     remote_path: z.string().describe('远程目标路径'),
+    async_transfer: z.boolean().optional().default(false).describe('大目录建议开启，后台传输并返回任务ID'),
   },
-  async ({ local_path, remote_path }) => {
+  async ({ local_path, remote_path, async_transfer }) => {
     const s = requireSsh();
     if (!fs.existsSync(local_path)) return text(`本地目录不存在: ${local_path}`);
+
+    if (async_transfer) {
+      const id = newTransferId();
+      const task: TransferTask = { id, type: 'upload_dir', localPath: local_path, remotePath: remote_path, status: 'running', progress: null, result: null, error: null, startTime: Date.now() };
+      transfers.set(id, task);
+      s.uploadDirectory(local_path, remote_path, (p) => { task.progress = p; })
+        .then((r) => { task.status = 'done'; task.result = r; })
+        .catch((e) => { task.status = 'error'; task.error = String(e); });
+      return text(`后台目录上传已启动: ${id}\n${local_path} → ${remote_path}\n用 transfer_status("${id}") 查看进度`);
+    }
+
     try {
       const r = await s.uploadDirectory(local_path, remote_path);
-      return text(`目录上传成功: ${local_path} → ${remote_path}\n${r.files} 个文件，压缩后 ${formatSize(r.bytes)}，耗时 ${formatElapsed(r.elapsed)}`);
+      return text(`目录上传成功: ${local_path} → ${remote_path}\n${formatTransferResult(r, `${r.files} 个文件`)}`);
     } catch (e) {
       return text(`目录上传失败: ${e}`);
     }
@@ -249,20 +310,78 @@ server.tool(
 
 server.tool(
   'download_file',
-  '从远程服务器下载文件到本地',
+  '从远程服务器下载文件到本地（大文件可用 async 模式后台传输）',
   {
     remote_path: z.string().describe('远程文件路径'),
     local_path: z.string().optional().describe('本地保存路径，留空则保存到当前目录'),
+    async_transfer: z.boolean().optional().default(false).describe('大文件建议开启，后台传输并返回任务ID'),
   },
-  async ({ remote_path, local_path }) => {
+  async ({ remote_path, local_path, async_transfer }) => {
     const s = requireSsh();
     const savePath = local_path || path.basename(remote_path);
+
+    if (async_transfer) {
+      const id = newTransferId();
+      const task: TransferTask = { id, type: 'download', localPath: savePath, remotePath: remote_path, status: 'running', progress: null, result: null, error: null, startTime: Date.now() };
+      transfers.set(id, task);
+      s.downloadFile(remote_path, savePath, (p) => { task.progress = p; })
+        .then((r) => { task.status = 'done'; task.result = r; })
+        .catch((e) => { task.status = 'error'; task.error = String(e); });
+      return text(`后台下载已启动: ${id}\n${remote_path} → ${savePath}\n用 transfer_status("${id}") 查看进度`);
+    }
+
     try {
       const r = await s.downloadFile(remote_path, savePath);
-      return text(`下载成功: ${remote_path} → ${savePath}\n${formatSize(r.bytes)}，耗时 ${formatElapsed(r.elapsed)}`);
+      return text(`下载成功: ${remote_path} → ${savePath}\n${formatTransferResult(r)}`);
     } catch (e) {
       return text(`下载失败: ${e}`);
     }
+  },
+);
+
+server.tool(
+  'transfer_status',
+  '查看后台传输任务的进度（配合 async_transfer=true 使用）',
+  {
+    task_id: z.string().optional().describe('任务ID，如 tf_1。留空则列出所有任务'),
+  },
+  async ({ task_id }) => {
+    if (!task_id) {
+      // 列出所有任务
+      if (transfers.size === 0) return text('没有传输任务');
+      const lines = [...transfers.values()].map((t) => {
+        const dir = t.type === 'download' ? '↓' : '↑';
+        if (t.status === 'done' && t.result)
+          return `  ${t.id} ${dir} ✅ 完成 — ${formatTransferResult(t.result)}`;
+        if (t.status === 'error')
+          return `  ${t.id} ${dir} ❌ 失败 — ${t.error}`;
+        if (t.progress)
+          return `  ${t.id} ${dir} 🔄 ${formatProgress(t.progress)}`;
+        return `  ${t.id} ${dir} 🔄 准备中...`;
+      });
+      return text('传输任务:\n' + lines.join('\n'));
+    }
+
+    const t = transfers.get(task_id);
+    if (!t) return text(`任务不存在: ${task_id}`);
+
+    const dir = t.type === 'download' ? '下载' : '上传';
+    const pathInfo = `${t.localPath} ↔ ${t.remotePath}`;
+
+    if (t.status === 'done' && t.result) {
+      return text(`✅ ${dir}完成: ${pathInfo}\n${formatTransferResult(t.result)}`);
+    }
+    if (t.status === 'error') {
+      return text(`❌ ${dir}失败: ${pathInfo}\n原因: ${t.error}`);
+    }
+    if (t.progress) {
+      const elapsed = Date.now() - t.startTime;
+      const remaining = t.progress.speed > 0
+        ? (t.progress.total - t.progress.transferred) / t.progress.speed
+        : 0;
+      return text(`🔄 ${dir}中: ${pathInfo}\n${formatProgress(t.progress)}\n已耗时 ${formatElapsed(elapsed)}，预计剩余 ${formatElapsed(remaining * 1000)}`);
+    }
+    return text(`🔄 ${dir}准备中: ${pathInfo}`);
   },
 );
 

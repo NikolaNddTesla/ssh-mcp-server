@@ -13,3 +13,5 @@ start-debug.mjs
 test.mjs
 mcp-publisher.exe
 mcp-publisher.tar.gz
+.mcpregistry_github_token
+.mcpregistry_registry_token

@@ -11,7 +11,17 @@ export interface TransferResult {
   bytes: number;
   files: number;
   elapsed: number;  // ms
+  speed: number;    // bytes/s
 }
+
+export interface TransferProgress {
+  transferred: number;
+  total: number;
+  speed: number;      // bytes/s
+  startTime: number;
+}
+
+export type OnProgress = (progress: TransferProgress) => void;
 
 
 export class SshManager {
@@ -192,35 +202,51 @@ export class SshManager {
     });
   }
 
-  async uploadFile(localPath: string, remotePath: string): Promise<TransferResult> {
+  async uploadFile(localPath: string, remotePath: string, onProgress?: OnProgress): Promise<TransferResult> {
     const sftp = await this.getSftp();
     const stat = fs.statSync(localPath);
     const start = Date.now();
     await new Promise<void>((resolve, reject) => {
-      sftp.fastPut(localPath, remotePath, (err) => (err ? reject(err) : resolve()));
+      sftp.fastPut(localPath, remotePath, {
+        step: onProgress ? (transferred: number, _chunk: number, total: number) => {
+          const elapsed = (Date.now() - start) / 1000;
+          onProgress({ transferred, total, speed: elapsed > 0 ? transferred / elapsed : 0, startTime: start });
+        } : undefined,
+      } as any, (err) => (err ? reject(err) : resolve()));
     });
-    return { bytes: stat.size, files: 1, elapsed: Date.now() - start };
+    const elapsed = Date.now() - start;
+    return { bytes: stat.size, files: 1, elapsed, speed: elapsed > 0 ? stat.size / (elapsed / 1000) : 0 };
   }
 
-  async downloadFile(remotePath: string, localPath: string): Promise<TransferResult> {
+  async downloadFile(remotePath: string, localPath: string, onProgress?: OnProgress): Promise<TransferResult> {
     const sftp = await this.getSftp();
     // 自动创建本地父目录
     const dir = path.dirname(localPath);
     if (dir && !fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 
+    // 先获取远程文件大小
+    const remoteStat = await new Promise<{ size: number }>((resolve, reject) => {
+      sftp.stat(remotePath, (err, stats) => (err ? reject(err) : resolve(stats)));
+    });
+
     const start = Date.now();
     await new Promise<void>((resolve, reject) => {
-      sftp.fastGet(remotePath, localPath, (err) => (err ? reject(err) : resolve()));
+      sftp.fastGet(remotePath, localPath, {
+        step: onProgress ? (transferred: number, _chunk: number, total: number) => {
+          const elapsed = (Date.now() - start) / 1000;
+          onProgress({ transferred, total, speed: elapsed > 0 ? transferred / elapsed : 0, startTime: start });
+        } : undefined,
+      } as any, (err) => (err ? reject(err) : resolve()));
     });
-    const stat = fs.statSync(localPath);
-    return { bytes: stat.size, files: 1, elapsed: Date.now() - start };
+    const elapsed = Date.now() - start;
+    return { bytes: remoteStat.size, files: 1, elapsed, speed: elapsed > 0 ? remoteStat.size / (elapsed / 1000) : 0 };
   }
 
   /**
    * 上传目录：本地 tar.gz 压缩 → SFTP 上传 → 远程解压 → 清理临时文件
    * 比逐文件上传快得多，尤其是大量小文件的场景。
    */
-  async uploadDirectory(localDir: string, remoteDir: string): Promise<TransferResult> {
+  async uploadDirectory(localDir: string, remoteDir: string, onProgress?: OnProgress): Promise<TransferResult> {
     // 统计本地文件数
     const fileCount = this.countFiles(localDir);
     const start = Date.now();
@@ -234,10 +260,15 @@ export class SshManager {
       this.createTarGz(localDir, tmpLocal);
       const tarSize = fs.statSync(tmpLocal).size;
 
-      // 2. SFTP 上传压缩包
+      // 2. SFTP 上传压缩包（带进度回调）
       const sftp = await this.getSftp();
       await new Promise<void>((resolve, reject) => {
-        sftp.fastPut(tmpLocal, remoteTar, (err) => (err ? reject(err) : resolve()));
+        sftp.fastPut(tmpLocal, remoteTar, {
+          step: onProgress ? (transferred: number, _chunk: number, total: number) => {
+            const elapsed = (Date.now() - start) / 1000;
+            onProgress({ transferred, total, speed: elapsed > 0 ? transferred / elapsed : 0, startTime: start });
+          } : undefined,
+        } as any, (err) => (err ? reject(err) : resolve()));
       });
 
       // 3. 远程解压
@@ -246,14 +277,13 @@ export class SshManager {
         120000,
       );
       if (!ok) {
-        // 解压失败，清理远程临时文件
         await this.execute(`rm -f ${remoteTar}`, 5000).catch(() => {});
         throw new Error(`远程解压失败: ${stderr}`);
       }
 
-      return { bytes: tarSize, files: fileCount, elapsed: Date.now() - start };
+      const elapsed = Date.now() - start;
+      return { bytes: tarSize, files: fileCount, elapsed, speed: elapsed > 0 ? tarSize / (elapsed / 1000) : 0 };
     } finally {
-      // 清理本地临时文件
       try { fs.unlinkSync(tmpLocal); } catch { /* ignore */ }
     }
   }
