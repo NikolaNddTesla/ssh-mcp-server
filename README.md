@@ -1,251 +1,153 @@
-<p align="center">
-  <h1 align="center">SSH MCP Server</h1>
-  <p align="center">
-    <strong>Let AI manage your servers — with zero-token file transfers.</strong>
-  </p>
-  <p align="center">
-    <a href="https://www.npmjs.com/package/@nl4ever/sshmcp"><img src="https://img.shields.io/npm/v/@nl4ever/sshmcp?color=blue&label=npm" alt="npm version"></a>
-    <a href="https://www.npmjs.com/package/@nl4ever/sshmcp"><img src="https://img.shields.io/npm/dm/@nl4ever/sshmcp?color=green" alt="npm downloads"></a>
-    <a href="https://github.com/NikolaNddTesla/ssh-mcp-server/blob/main/LICENSE"><img src="https://img.shields.io/github/license/NikolaNddTesla/ssh-mcp-server" alt="license"></a>
-    <a href="https://modelcontextprotocol.io/"><img src="https://img.shields.io/badge/MCP-compatible-purple" alt="MCP compatible"></a>
-  </p>
-</p>
+# MCP Registry
 
----
+The MCP registry provides MCP clients with a list of MCP servers, like an app store for MCP servers.
 
-A [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that gives AI the power to manage remote servers via SSH — execute commands, transfer files, and manage multi-server environments with per-connection proxy support.
+[**📤 Publish my MCP server**](docs/modelcontextprotocol-io/quickstart.mdx) | [**⚡️ Live API docs**](https://registry.modelcontextprotocol.io/docs) | [**👀 Ecosystem vision**](docs/design/ecosystem-vision.md) | 📖 **[Full documentation](./docs)**
 
-## Features
+## Development Status
 
-- 🚀 **Remote Command Execution** — Run any shell command on your servers
-- 📦 **SFTP File Transfer** — Upload / download files and directories with zero token cost
-- 🌐 **Per-Connection SOCKS Proxy** — Route each server through its own SOCKS4/5 proxy
-- 🖥️ **Multi-Server Management** — Save and switch between unlimited server configs
-- 🔗 **Jump Host / Bastion Support** — Reach servers behind firewalls
-- 🔑 **Flexible Auth** — Password, private key, SSH agent, keyboard-interactive
-- 💾 **Persistent Configuration** — Configure once, use across all sessions
+**2025-10-24 update**: The Registry API has entered an **API freeze (v0.1)** 🎉. For the next month or more, the API will remain stable with no breaking changes, allowing integrators to confidently implement support. This freeze applies to v0.1 while development continues on v0. We'll use this period to validate the API in real-world integrations and gather feedback to shape v1 for general availability. Thank you to everyone for your contributions and patience—your involvement has been key to getting us here!
 
-### Zero-Token File Transfer
+**2025-09-08 update**: The registry has launched in preview 🎉 ([announcement blog post](https://blog.modelcontextprotocol.io/posts/2025-09-08-mcp-registry-preview/)). While the system is now more stable, this is still a preview release and breaking changes or data resets may occur. A general availability (GA) release will follow later. We'd love your feedback in [GitHub discussions](https://github.com/modelcontextprotocol/registry/discussions/new?category=ideas) or in the [#registry-dev Discord](https://discord.com/channels/1358869848138059966/1369487942862504016) ([joining details here](https://modelcontextprotocol.io/community/communication)).
 
-File transfers go directly through SFTP between your machine and the server. The AI only sends a file path — **it never sees or processes the file content**. Transfer a 10GB database dump at the same token cost as a 1KB config file: **near zero**.
-
-```
-You: "Deploy the build to production"
-
-AI:  upload_directory("./dist", "/var/www/app")  ← just the path
-                     |
-     MCP Server: local disk --SFTP--> remote server  ← direct transfer
-                     |
-AI:  "Deployed successfully (142 files, 38MB)"  ← only the result
-```
-
-## Quick Start
-
-**One command. No config files to edit.**
-
-```bash
-# Claude Code
-claude mcp add sshmcp npx -- -y @nl4ever/sshmcp
-
-# Or install globally first
-npm install -g @nl4ever/sshmcp
-claude mcp add sshmcp sshmcp
-```
-
-Then just tell Claude:
-
-> *"Connect to my server 192.168.1.100 as root and check disk usage"*
-
-Claude will call `add_server` + `connect` + `execute("df -h")` automatically.
-
-## Installation
-
-### npx (No Install)
-
-```bash
-npx @nl4ever/sshmcp
-```
-
-### Global Install (Recommended)
-
-```bash
-npm install -g @nl4ever/sshmcp
-```
-
-### From Source
-
-```bash
-git clone https://github.com/NikolaNddTesla/ssh-mcp-server.git
-cd ssh-mcp-server
-npm install && npm run build
-node dist/index.js
-```
-
-## Integration
-
-<details>
-<summary><strong>Claude Code</strong></summary>
-
-```bash
-claude mcp add sshmcp sshmcp
-```
-
-</details>
-
-<details>
-<summary><strong>Claude Desktop</strong></summary>
-
-Add to `claude_desktop_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "sshmcp": {
-      "command": "npx",
-      "args": ["-y", "@nl4ever/sshmcp"]
-    }
-  }
-}
-```
-
-</details>
-
-<details>
-<summary><strong>Cursor</strong></summary>
-
-Go to `Settings > MCP` and add:
-
-```json
-{
-  "mcpServers": {
-    "sshmcp": {
-      "command": "npx",
-      "args": ["-y", "@nl4ever/sshmcp"]
-    }
-  }
-}
-```
-
-</details>
-
-<details>
-<summary><strong>Windsurf / Cline / Other MCP Clients</strong></summary>
-
-Any MCP-compatible client can use this server via stdio transport:
-
-```json
-{
-  "mcpServers": {
-    "sshmcp": {
-      "command": "npx",
-      "args": ["-y", "@nl4ever/sshmcp"]
-    }
-  }
-}
-```
-
-Or if installed globally:
-
-```json
-{
-  "mcpServers": {
-    "sshmcp": {
-      "command": "sshmcp"
-    }
-  }
-}
-```
-
-</details>
-
-## What Can It Do?
-
-### 15 Tools at AI's Fingertips
-
-**Connection & Servers**
-| Tool | What it does |
-|------|-------------|
-| `connect` | Connect to a server |
-| `disconnect` | End current session |
-| `test_connection` | Test connectivity without switching active connection |
-| `list_servers` | Show all configured servers |
-| `get_server` | View server details (passwords auto-masked) |
-| `add_server` | Add or update a server |
-| `delete_server` | Remove a server |
-
-**Remote Execution**
-| Tool | What it does |
-|------|-------------|
-| `execute` | Run any shell command (with configurable timeout) |
-| `write_file` | Write text content to a remote file |
-
-**File Transfer (Zero Token Cost)**
-| Tool | What it does |
-|------|-------------|
-| `upload_file` | Upload a local file to the server |
-| `upload_directory` | Recursively upload an entire directory |
-| `download_file` | Download a file from the server |
-
-**Proxy Management**
-| Tool | What it does |
-|------|-------------|
-| `list_proxies` | Show all configured SOCKS proxies |
-| `add_proxy` | Add a SOCKS4/5 proxy |
-| `delete_proxy` | Remove a proxy |
-
-## Configuration
-
-All settings persist in `~/.ssh-mcp/config.json`. Configure once, use across all sessions.
-
-### Server with Password
-
-```
-add_server({
-  server_id: "prod",
-  name: "Production",
-  host: "192.168.1.100",
-  port: 22,
-  username: "root",
-  password: "your-password"
-})
-```
-
-### Server with Proxy (for restricted networks)
-
-```
-add_proxy({ proxy_id: "us", name: "US Proxy", host: "proxy.example.com", port: 1080 })
-
-add_server({
-  server_id: "overseas",
-  name: "Overseas Server",
-  host: "1.2.3.4",
-  port: 22,
-  username: "root",
-  password: "your-password",
-  proxy: "us"
-})
-```
-
-### All Authentication Methods
-
-| Method | Parameter | Use Case |
-|--------|-----------|----------|
-| Password | `password` | Most common |
-| Private Key File | `private_key` | `.pem` / `id_rsa` on your machine |
-| Private Key Inline | `private_key_content` | Paste key directly (CI/CD friendly) |
-| SSH Agent | `use_agent: true` | Use system ssh-agent, no password needed |
-| Keyboard Interactive | `keyboard_interactive: true` | OTP / 2FA |
-| Jump Host | `jump_host` | Connect through a bastion server |
-
-## Requirements
-
-- Node.js >= 18.0.0
-- SSH access to target servers
+Current key maintainers:
+- **Adam Jones** (Anthropic) [@domdomegg](https://github.com/domdomegg)  
+- **Tadas Antanavicius** (PulseMCP) [@tadasant](https://github.com/tadasant)
+- **Toby Padilla** (GitHub) [@toby](https://github.com/toby)
+- **Radoslav (Rado) Dimitrov** (Stacklok) [@rdimitrov](https://github.com/rdimitrov)
 
 ## Contributing
 
-Issues and PRs are welcome! If you find a bug or have a feature request, please [open an issue](https://github.com/NikolaNddTesla/ssh-mcp-server/issues).
+We use multiple channels for collaboration - see [modelcontextprotocol.io/community/communication](https://modelcontextprotocol.io/community/communication).
 
-## License
+Often (but not always) ideas flow through this pipeline:
 
-MIT
+- **[Discord](https://modelcontextprotocol.io/community/communication)** - Real-time community discussions
+- **[Discussions](https://github.com/modelcontextprotocol/registry/discussions)** - Propose and discuss product/technical requirements
+- **[Issues](https://github.com/modelcontextprotocol/registry/issues)** - Track well-scoped technical work  
+- **[Pull Requests](https://github.com/modelcontextprotocol/registry/pulls)** - Contribute work towards issues
+
+### Quick start:
+
+#### Pre-requisites
+
+- **Docker**
+- **Go 1.24.x**
+- **ko** - Container image builder for Go ([installation instructions](https://ko.build/install/))
+- **golangci-lint v2.4.0**
+
+#### Running the server
+
+```bash
+# Start full development environment
+make dev-compose
+```
+
+This starts the registry at [`localhost:8080`](http://localhost:8080) with PostgreSQL. The database uses ephemeral storage and is reset each time you restart the containers, ensuring a clean state for development and testing.
+
+**Note:** The registry uses [ko](https://ko.build) to build container images. The `make dev-compose` command automatically builds the registry image with ko and loads it into your local Docker daemon before starting the services.
+
+By default, the registry seeds from the production API with a filtered subset of servers (to keep startup fast). This ensures your local environment mirrors production behavior and all seed data passes validation. For offline development you can seed from a file without validation with `MCP_REGISTRY_SEED_FROM=data/seed.json MCP_REGISTRY_ENABLE_REGISTRY_VALIDATION=false make dev-compose`.
+
+The setup can be configured with environment variables in [docker-compose.yml](./docker-compose.yml) - see [.env.example](./.env.example) for a reference.
+
+<details>
+<summary>Alternative: Running a pre-built Docker image</summary>
+
+Pre-built Docker images are automatically published to GitHub Container Registry:
+
+```bash
+# Run latest stable release
+docker run -p 8080:8080 ghcr.io/modelcontextprotocol/registry:latest
+
+# Run latest from main branch (continuous deployment)
+docker run -p 8080:8080 ghcr.io/modelcontextprotocol/registry:main
+
+# Run specific release version
+docker run -p 8080:8080 ghcr.io/modelcontextprotocol/registry:v1.0.0
+
+# Run development build from main branch
+docker run -p 8080:8080 ghcr.io/modelcontextprotocol/registry:main-20250906-abc123d
+```
+
+**Available tags:** 
+- **Releases**: `latest`, `v1.0.0`, `v1.1.0`, etc.
+- **Continuous**: `main` (latest main branch build)
+- **Development**: `main-<date>-<sha>` (specific commit builds)
+
+</details>
+
+#### Publishing a server
+
+To publish a server, we've built a simple CLI. You can use it with:
+
+```bash
+# Build the latest CLI
+make publisher
+
+# Use it!
+./bin/mcp-publisher --help
+```
+
+See [the publisher guide](./docs/modelcontextprotocol-io/quickstart.mdx) for more details.
+
+#### Other commands
+
+```bash
+# Run lint, unit tests and integration tests
+make check
+```
+
+There are also a few more helpful commands for development. Run `make help` to learn more, or look in [Makefile](./Makefile).
+
+<!--
+For Claude and other AI tools: Always prefer make targets over custom commands where possible.
+-->
+
+## Architecture
+
+### Project Structure
+
+```
+├── cmd/                     # Application entry points
+│   └── publisher/           # Server publishing tool
+├── data/                    # Seed data
+├── deploy/                  # Deployment configuration (Pulumi)
+├── docs/                    # Documentation
+├── internal/                # Private application code
+│   ├── api/                 # HTTP handlers and routing
+│   ├── auth/                # Authentication (GitHub OAuth, JWT, namespace blocking)
+│   ├── config/              # Configuration management
+│   ├── database/            # Data persistence (PostgreSQL)
+│   ├── service/             # Business logic
+│   ├── telemetry/           # Metrics and monitoring
+│   └── validators/          # Input validation
+├── pkg/                     # Public packages
+│   ├── api/                 # API types and structures
+│   │   └── v0/              # Version 0 API types
+│   └── model/               # Data models for server.json
+├── scripts/                 # Development and testing scripts
+├── tests/                   # Integration tests
+└── tools/                   # CLI tools and utilities
+    └── validate-*.sh        # Schema validation tools
+```
+
+### Authentication
+
+Publishing supports multiple authentication methods:
+- **GitHub OAuth** - For publishing by logging into GitHub
+- **GitHub OIDC** - For publishing from GitHub Actions
+- **DNS verification** - For proving ownership of a domain and its subdomains
+- **HTTP verification** - For proving ownership of a domain
+
+The registry validates namespace ownership when publishing. E.g. to publish...:
+- `io.github.domdomegg/my-cool-mcp` you must login to GitHub as `domdomegg`, or be in a GitHub Action on domdomegg's repos
+- `me.adamjones/my-cool-mcp` you must prove ownership of `adamjones.me` via DNS or HTTP challenge
+
+## Community Projects
+
+Check out [community projects](docs/community-projects.md) to explore notable registry-related work created by the community.
+
+## More documentation
+
+See the [documentation](./docs) for more details if your question has not been answered here!

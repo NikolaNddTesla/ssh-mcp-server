@@ -11,3 +11,5 @@ stderr.log
 downloaded_test.txt
 start-debug.mjs
 test.mjs
+mcp-publisher.exe
+mcp-publisher.tar.gz
