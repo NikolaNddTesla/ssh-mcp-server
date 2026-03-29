@@ -13,9 +13,9 @@ export interface TransferResult {
   files: number;
   elapsed: number;  // ms
   speed: number;    // bytes/s
-  skipped?: boolean;       // 单文件：MD5 相同已跳过
-  skippedFiles?: number;   // 目录：跳过的文件数
-  remoteOnly?: string[];   // 目录：远程有但本地没有的文件（可能是旧版本残留）
+  skipped?: boolean;       // single file: skipped (same MD5)
+  skippedFiles?: number;   // directory: number of skipped files
+  remoteOnly?: string[];   // directory: files existing on remote but not locally (possibly stale/outdated)
 }
 
 export interface TransferProgress {
@@ -33,7 +33,7 @@ export class SshManager {
   private sftp: SFTPWrapper | null = null;
   public lastError = '';
 
-  // ── 连接 ──────────────────────────────────────────────
+  // ── Connection ──────────────────────────────────────────────
 
   async connect(server: ServerConfig, proxy?: ProxyConfig, jumpServer?: ServerConfig): Promise<boolean> {
     await this.disconnect();
@@ -41,10 +41,10 @@ export class SshManager {
       let sock: net.Socket | undefined;
 
       if (jumpServer) {
-        // 跳板机模式：先 SSH 到跳板机，再从跳板机 TCP 转发到目标
+        // Jump host mode: SSH to jump host first, then TCP forward to target
         sock = await this.createJumpSocket(server.host, server.port, jumpServer);
       } else if (proxy) {
-        // SOCKS 代理模式
+        // SOCKS proxy mode
         sock = await this.createProxySocket(server.host, server.port, proxy);
       }
 
@@ -55,7 +55,7 @@ export class SshManager {
 
         if (server.keyboardInteractive) {
           c.on('keyboard-interactive', (_name, _instructions, _lang, prompts, finish) => {
-            // 用密码自动响应所有提示（适用于简单 OTP 场景）
+            // Auto-respond to all prompts with password (for simple OTP scenarios)
             const responses = prompts.map(() => server.password ?? '');
             finish(responses);
           });
@@ -66,7 +66,7 @@ export class SshManager {
         c.connect(connectCfg);
       });
 
-      // 监听连接断开，自动清理状态
+      // Listen for disconnect, auto-cleanup state
       this.client!.on('close', () => {
         this.sftp = null;
         this.client = null;
@@ -83,7 +83,7 @@ export class SshManager {
     }
   }
 
-  /** 仅测试连通性，不保留连接 */
+  /** Test connectivity only, does not retain connection */
   async testConnection(server: ServerConfig, proxy?: ProxyConfig, jumpServer?: ServerConfig): Promise<boolean> {
     const tmp = new SshManager();
     const ok = await tmp.connect(server, proxy, jumpServer);
@@ -102,7 +102,7 @@ export class SshManager {
     };
 
     if (server.useAgent) {
-      // 使用系统 ssh-agent
+      // Use system ssh-agent
       const agentSocket = process.env.SSH_AUTH_SOCK;
       if (agentSocket) cfg.agent = agentSocket;
     }
@@ -150,7 +150,7 @@ export class SshManager {
     return new Promise((resolve, reject) => {
       jumpClient.forwardOut('127.0.0.1', 0, host, port, (err, stream) => {
         if (err) { jumpClient.end(); return reject(err); }
-        // 当目标流关闭时，一并关闭跳板连接
+        // Close jump connection when target stream closes
         stream.on('close', () => jumpClient.end());
         resolve(stream as unknown as net.Socket);
       });
@@ -166,10 +166,10 @@ export class SshManager {
     return this.client !== null;
   }
 
-  // ── 命令执行 ──────────────────────────────────────────
+  // ── Command Execution ──────────────────────────────────────────
 
   async execute(command: string, timeoutMs = 30000): Promise<{ ok: boolean; stdout: string; stderr: string }> {
-    if (!this.client) throw new Error('未连接服务器');
+    if (!this.client) throw new Error('Not connected to server');
 
     return new Promise((resolve) => {
       let resolved = false;
@@ -179,7 +179,7 @@ export class SshManager {
       const timer = setTimeout(() => {
         if (!resolved) {
           resolved = true;
-          resolve({ ok: false, stdout, stderr: `[超时] 命令执行超过 ${timeoutMs / 1000}s` });
+          resolve({ ok: false, stdout, stderr: `[Timeout] Command exceeded ${timeoutMs / 1000}s` });
         }
       }, timeoutMs);
 
@@ -202,11 +202,11 @@ export class SshManager {
     });
   }
 
-  // ── SFTP 工具 ─────────────────────────────────────────
+  // ── SFTP Tools ─────────────────────────────────────────
 
   private getSftp(): Promise<SFTPWrapper> {
     if (this.sftp) return Promise.resolve(this.sftp);
-    if (!this.client) return Promise.reject(new Error('未连接服务器'));
+    if (!this.client) return Promise.reject(new Error('Not connected to server'));
     return new Promise((resolve, reject) => {
       this.client!.sftp((err, sftp) => {
         if (err) return reject(err);
@@ -219,7 +219,7 @@ export class SshManager {
   async uploadFile(localPath: string, remotePath: string, onProgress?: OnProgress, skipSame?: boolean): Promise<TransferResult> {
     const stat = fs.statSync(localPath);
 
-    // MD5 去重：本地与远程相同则跳过
+    // MD5 dedup: skip if local and remote are identical
     if (skipSame) {
       const localMd5 = this.computeLocalMd5(localPath);
       const remoteMd5 = await this.computeRemoteMd5(remotePath);
@@ -244,11 +244,11 @@ export class SshManager {
 
   async downloadFile(remotePath: string, localPath: string, onProgress?: OnProgress): Promise<TransferResult> {
     const sftp = await this.getSftp();
-    // 自动创建本地父目录
+    // Auto-create local parent directory
     const dir = path.dirname(localPath);
     if (dir && !fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 
-    // 先获取远程文件大小
+    // Get remote file size first
     const remoteStat = await new Promise<{ size: number }>((resolve, reject) => {
       sftp.stat(remotePath, (err, stats) => (err ? reject(err) : resolve(stats)));
     });
@@ -267,8 +267,8 @@ export class SshManager {
   }
 
   /**
-   * 上传目录：本地 tar.gz 压缩 → SFTP 上传 → 远程解压 → 清理临时文件
-   * 比逐文件上传快得多，尤其是大量小文件的场景。
+   * Upload directory: local tar.gz → SFTP upload → remote extract → cleanup.
+   * Much faster than per-file upload, especially for many small files.
    */
   async uploadDirectory(localDir: string, remoteDir: string, onProgress?: OnProgress, skipSame?: boolean): Promise<TransferResult> {
     const allFiles = this.listFiles(localDir);
@@ -279,7 +279,7 @@ export class SshManager {
     let remoteOnly: string[] = [];
     const localFileSet = new Set(allFiles);
 
-    // MD5 去重：只上传有变化的文件，同时找出远程多余文件
+    // MD5 dedup: only upload changed files, also find remote-only files
     if (skipSame && allFiles.length > 0) {
       const remoteMd5Map = await this.getRemoteMd5Map(remoteDir);
       if (remoteMd5Map) {
@@ -293,13 +293,13 @@ export class SshManager {
             filesToUpload.push(relPath);
           }
         }
-        // 收集远程有但本地没有的文件
+        // Collect files existing on remote but not locally
         for (const remotePath of remoteMd5Map.keys()) {
           if (!localFileSet.has(remotePath)) {
             remoteOnly.push(remotePath);
           }
         }
-        // 全部相同，无需上传
+        // All identical, nothing to upload
         if (filesToUpload.length === 0) {
           return {
             bytes: 0, files: 0, elapsed: Date.now() - start, speed: 0,
@@ -310,14 +310,14 @@ export class SshManager {
       }
     }
 
-    // 压缩为 tar.gz（skipSame 时只打包有变化的文件）
+    // Compress to tar.gz (only changed files when skipSame)
     const tmpName = `sshmcp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.tar.gz`;
     const tmpLocal = path.join(os.tmpdir(), tmpName);
     const remoteTar = `/tmp/${tmpName}`;
 
     try {
       if (skipSame && filesToUpload.length < allFiles.length) {
-        // 写文件列表，只打包变化的文件
+        // Write file list, only pack changed files
         const listFile = path.join(os.tmpdir(), `sshmcp_filelist_${Date.now()}.txt`);
         fs.writeFileSync(listFile, filesToUpload.join('\n'), 'utf-8');
         try {
@@ -332,7 +332,7 @@ export class SshManager {
       }
       const tarSize = fs.statSync(tmpLocal).size;
 
-      // SFTP 上传压缩包（带进度回调）
+      // SFTP upload archive (with progress callback)
       const sftp = await this.getSftp();
       await new Promise<void>((resolve, reject) => {
         sftp.fastPut(tmpLocal, remoteTar, {
@@ -343,14 +343,14 @@ export class SshManager {
         } as any, (err) => (err ? reject(err) : resolve()));
       });
 
-      // 远程解压
+      // Remote extraction
       const { ok, stderr } = await this.execute(
         `mkdir -p ${remoteDir} && tar -xzf ${remoteTar} -C ${remoteDir} && rm -f ${remoteTar}`,
         120000,
       );
       if (!ok) {
         await this.execute(`rm -f ${remoteTar}`, 5000).catch(() => {});
-        throw new Error(`远程解压失败: ${stderr}`);
+        throw new Error(`Remote extraction failed: ${stderr}`);
       }
 
       const elapsed = Date.now() - start;
@@ -365,7 +365,7 @@ export class SshManager {
     }
   }
 
-  /** 递归统计目录下的文件数量 */
+  /** Recursively count files in directory */
   private countFiles(dir: string): number {
     let count = 0;
     const entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -376,7 +376,7 @@ export class SshManager {
     return count;
   }
 
-  /** 递归列出目录下所有文件的相对路径 */
+  /** Recursively list all file relative paths in directory */
   private listFiles(dir: string, base = ''): string[] {
     const result: string[] = [];
     const entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -388,21 +388,21 @@ export class SshManager {
     return result;
   }
 
-  /** 计算本地文件 MD5 */
+  /** Compute local file MD5 */
   private computeLocalMd5(filePath: string): string {
     const hash = crypto.createHash('md5');
     const data = fs.readFileSync(filePath);
     return hash.update(data).digest('hex');
   }
 
-  /** 计算远程文件 MD5（文件不存在返回 null） */
+  /** Compute remote file MD5 (returns null if file doesn't exist) */
   private async computeRemoteMd5(remotePath: string): Promise<string | null> {
     const { ok, stdout } = await this.execute(`md5sum "${remotePath}" 2>/dev/null | awk '{print $1}'`, 10000);
     if (!ok || !stdout.trim()) return null;
     return stdout.trim();
   }
 
-  /** 获取远程目录所有文件的 MD5 映射（相对路径 → md5） */
+  /** Get MD5 map of all files in remote directory (relative path → md5) */
   private async getRemoteMd5Map(remoteDir: string): Promise<Map<string, string> | null> {
     const { ok, stdout } = await this.execute(
       `find "${remoteDir}" -type f -exec md5sum {} + 2>/dev/null`,
@@ -421,12 +421,12 @@ export class SshManager {
     return map;
   }
 
-  /** 使用系统 tar 命令创建 tar.gz（跨平台：Unix tar / Windows tar） */
+  /** Create tar.gz using system tar command (cross-platform) */
   private createTarGz(sourceDir: string, outputPath: string): void {
-    // 使用 -C 切换到源目录内部，打包 '.' 使解压后内容直接铺开在目标目录
+    // Use -C to switch into source dir, pack '.' so contents extract directly into target
     execSync(`tar -czf "${outputPath}" -C "${sourceDir}" .`, {
       stdio: 'pipe',
-      timeout: 300000,  // 5 分钟超时
+      timeout: 300000,  // 5 min timeout
     });
   }
 
@@ -452,14 +452,14 @@ export class SshManager {
     const tmpLocal = path.join(os.tmpdir(), tmpName);
 
     try {
-      // 1. 远程压缩
+      // 1. Remote compression
       const { ok, stderr } = await this.execute(
         `tar -czf ${remoteTar} -C "${remotePath}" .`,
         300000,
       );
-      if (!ok) throw new Error(`远程压缩失败: ${stderr}`);
+      if (!ok) throw new Error(`Remote compression failed: ${stderr}`);
 
-      // 2. SFTP 下载压缩包
+      // 2. SFTP download archive
       const sftp = await this.getSftp();
       const remoteStat = await new Promise<{ size: number }>((resolve, reject) => {
         sftp.stat(remoteTar, (err, stats) => (err ? reject(err) : resolve(stats)));
@@ -473,17 +473,17 @@ export class SshManager {
         } as any, (err) => (err ? reject(err) : resolve()));
       });
 
-      // 3. 清理远程临时文件
+      // 3. Cleanup remote temp file
       await this.execute(`rm -f ${remoteTar}`, 5000).catch(() => {});
 
-      // 4. 本地解压
+      // 4. Local extraction
       if (!fs.existsSync(localPath)) fs.mkdirSync(localPath, { recursive: true });
       execSync(`tar -xzf "${tmpLocal}" -C "${localPath}"`, {
         stdio: 'pipe',
         timeout: 300000,
       });
 
-      // 统计文件数
+      // Count files
       const fileCount = this.countFiles(localPath);
       const elapsed = Date.now() - start;
       return { bytes: remoteStat.size, files: fileCount, elapsed, speed: elapsed > 0 ? remoteStat.size / (elapsed / 1000) : 0 };

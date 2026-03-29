@@ -8,50 +8,50 @@ import os from 'os';
 import { ConfigManager } from './config.js';
 import { SshManager, TransferProgress, TransferResult } from './ssh-manager.js';
 
-// 配置文件存在用户目录，避免被 build 清掉
+// Config file in user home dir to survive builds
 const CONFIG_DIR = path.join(os.homedir(), '.ssh-mcp');
 const CONFIG_PATH = path.join(CONFIG_DIR, 'config.json');
 if (!fs.existsSync(CONFIG_DIR)) fs.mkdirSync(CONFIG_DIR, { recursive: true });
 
 const config = new ConfigManager(CONFIG_PATH);
 
-// ── 连接池 ──────────────────────────────────────────────
-// key: server_id（已配置）或 "host:port"（临时）
+// ── Connection Pool ──────────────────────────────────────────────
+// key: server_id (configured) or "host:port" (temporary)
 const pool = new Map<string, SshManager>();
 
-/** 获取或自动建立连接（断连自动重连） */
+/** Get or auto-establish connection (auto-reconnect on drop) */
 async function getConnection(server_id: string): Promise<{ ssh: SshManager; label: string } | { error: string }> {
-  // 已有活跃连接？直接复用
+  // Active connection exists? Reuse it
   const existing = pool.get(server_id);
   if (existing?.isConnected()) {
     return { ssh: existing, label: `[${server_id}] ` };
   }
 
-  // 连接断了，清理旧实例
+  // Connection dropped, cleanup stale instance
   if (existing) {
     await existing.disconnect().catch(() => {});
     pool.delete(server_id);
   }
 
-  // 尝试从配置自动连接（或重连）
+  // Try auto-connect from config (or reconnect)
   const s = config.getServer(server_id);
-  if (!s) return { error: `服务器不存在且无活跃连接: ${server_id}\n请先用 add_server 添加，或用 quick_connect 临时连接。` };
+  if (!s) return { error: `Server not found and no active connection: ${server_id}\nUse add_server to add, or quick_connect for temporary connection.` };
 
   const proxy = s.proxy ? config.getProxy(s.proxy) ?? undefined : undefined;
-  if (s.proxy && !proxy) return { error: `代理不存在: ${s.proxy}，请先用 add_proxy 添加。` };
+  if (s.proxy && !proxy) return { error: `Proxy not found: ${s.proxy}. Use add_proxy to add it first.` };
 
   const jump = s.jumpHost ? config.getServer(s.jumpHost) ?? undefined : undefined;
-  if (s.jumpHost && !jump) return { error: `跳板机不存在: ${s.jumpHost}，请先用 add_server 添加。` };
+  if (s.jumpHost && !jump) return { error: `Jump host not found: ${s.jumpHost}. Use add_server to add it first.` };
 
   const ssh = new SshManager();
   const ok = await ssh.connect(s, proxy, jump);
-  if (!ok) return { error: `连接失败: ${s.name} (${s.host}:${s.port})\n原因: ${ssh.lastError}` };
+  if (!ok) return { error: `Connection failed: ${s.name} (${s.host}:${s.port})\nReason: ${ssh.lastError}` };
 
   pool.set(server_id, ssh);
   return { ssh, label: `[${server_id}] ` };
 }
 
-// ── 传输任务管理 ────────────────────────────────────────
+// ── Transfer Task Management ────────────────────────────────────────
 interface TransferTask {
   id: string;
   serverId: string;
@@ -77,7 +77,7 @@ const server = new McpServer({
   version: '2.0.0',
 });
 
-// ── 工具函数 ──────────────────────────────────────────────
+// ── Utility Functions ──────────────────────────────────────────────
 
 function text(t: string) {
   return { content: [{ type: 'text' as const, text: t }] };
@@ -101,10 +101,10 @@ function formatSpeed(bytesPerSec: number): string {
 }
 
 function formatTransferResult(r: TransferResult, extra = ''): string {
-  const parts = [formatSize(r.bytes), `耗时 ${formatElapsed(r.elapsed)}`];
+  const parts = [formatSize(r.bytes), `${formatElapsed(r.elapsed)}`];
   if (r.speed > 0) parts.push(formatSpeed(r.speed));
   if (extra) parts.unshift(extra);
-  return parts.join('，');
+  return parts.join(' | ');
 }
 
 function formatProgress(p: TransferProgress): string {
@@ -112,22 +112,22 @@ function formatProgress(p: TransferProgress): string {
   return `${formatSize(p.transferred)} / ${formatSize(p.total)} (${pct}%) — ${formatSpeed(p.speed)}`;
 }
 
-// server_id 参数定义，所有操作工具共用
-const serverIdParam = z.string().describe('服务器ID（已配置的 server_id 或临时连接返回的 host:port）');
+// server_id parameter, shared by all operation tools
+const serverIdParam = z.string().describe('Server ID (configured server_id or host:port from quick_connect)');
 
-// ── 连接管理 ──────────────────────────────────────────────
+// ── Connection Management ──────────────────────────────────────────────
 
-server.tool('list_servers', '列出所有已配置的服务器和活跃连接', {}, async () => {
+server.tool('list_servers', 'List all configured servers and active connections', {}, async () => {
   const servers = config.getServers();
   const lines: string[] = [];
 
-  // 已配置的服务器
+  // Configured servers
   if (Object.keys(servers).length > 0) {
-    lines.push('已配置的服务器:');
+    lines.push('Configured servers:');
     for (const [id, s] of Object.entries(servers)) {
       const tags: string[] = [];
-      if (s.proxy) tags.push(`代理: ${s.proxy}`);
-      if (s.jumpHost) tags.push(`跳板: ${s.jumpHost}`);
+      if (s.proxy) tags.push(`proxy: ${s.proxy}`);
+      if (s.jumpHost) tags.push(`jump: ${s.jumpHost}`);
       if (s.useAgent) tags.push('agent');
       if (s.keyboardInteractive) tags.push('kbd-interactive');
       const tagStr = tags.length ? ` [${tags.join(', ')}]` : '';
@@ -136,61 +136,61 @@ server.tool('list_servers', '列出所有已配置的服务器和活跃连接', 
     }
   }
 
-  // 临时连接
+  // Temporary connections
   const tmpConns = [...pool.entries()].filter(([id]) => !servers[id] && pool.get(id)?.isConnected());
   if (tmpConns.length > 0) {
-    lines.push('临时连接:');
+    lines.push('Temporary connections:');
     for (const [id] of tmpConns) {
       lines.push(`  ${id} ✅`);
     }
   }
 
-  if (lines.length === 0) return text('没有已配置的服务器，请使用 add_server 添加。');
+  if (lines.length === 0) return text('No configured servers. Use add_server to add one.');
   return text(lines.join('\n'));
 });
 
 server.tool(
   'get_server',
-  '查看单台服务器的配置详情',
-  { server_id: z.string().describe('服务器ID') },
+  'View server configuration details',
+  { server_id: z.string().describe('Server ID') },
   async ({ server_id }) => {
     const s = config.getServer(server_id);
-    if (!s) return text(`服务器不存在: ${server_id}`);
+    if (!s) return text(`Server not found: ${server_id}`);
     const info = { ...s } as Record<string, unknown>;
     if (info.password) info.password = '***';
     if (info.passphrase) info.passphrase = '***';
-    if (info.privateKeyContent) info.privateKeyContent = '(已设置)';
-    const connected = pool.get(server_id)?.isConnected() ? '（已连接）' : '（未连接）';
+    if (info.privateKeyContent) info.privateKeyContent = '(set)';
+    const connected = pool.get(server_id)?.isConnected() ? '(connected)' : '(disconnected)';
     return text(`${connected}\n${JSON.stringify(info, null, 2)}`);
   },
 );
 
 server.tool(
   'connect',
-  '手动连接到服务器（通常不需要，操作工具会自动连接）',
-  { server_id: z.string().describe('服务器ID') },
+  'Manually connect to server (usually not needed, tools auto-connect)',
+  { server_id: z.string().describe('Server ID') },
   async ({ server_id }) => {
     const r = await getConnection(server_id);
     if ('error' in r) return text(r.error);
     const s = config.getServer(server_id);
-    return text(`已连接: ${s?.name ?? server_id}`);
+    return text(`Connected: ${s?.name ?? server_id}`);
   },
 );
 
 server.tool(
   'quick_connect',
-  '临时连接服务器（不保存配置），返回 host:port 作为后续操作的 server_id',
+  'Temporary server connection (not saved). Returns host:port as server_id for subsequent operations',
   {
-    host: z.string().describe('IP 地址或域名'),
-    username: z.string().describe('SSH 用户名'),
-    port: z.number().int().default(22).describe('SSH 端口，默认 22'),
-    password: z.string().optional().describe('SSH 密码'),
-    private_key: z.string().optional().describe('私钥文件路径'),
+    host: z.string().describe('IP address or hostname'),
+    username: z.string().describe('SSH username'),
+    port: z.number().int().default(22).describe('SSH port, default 22'),
+    password: z.string().optional().describe('SSH password'),
+    private_key: z.string().optional().describe('Private key file path'),
   },
   async ({ host, username, port, password, private_key }) => {
     const connId = `${host}:${port}`;
 
-    // 如果已有同 host:port 的连接，先断开
+    // Disconnect existing connection with same host:port
     const existing = pool.get(connId);
     if (existing) { await existing.disconnect(); pool.delete(connId); }
 
@@ -203,44 +203,44 @@ server.tool(
 
     const ssh = new SshManager();
     const ok = await ssh.connect(tmpServer);
-    if (!ok) return text(`连接失败: ${connId}\n原因: ${ssh.lastError}`);
+    if (!ok) return text(`Connection failed: ${connId}\nReason: ${ssh.lastError}`);
 
     pool.set(connId, ssh);
-    return text(`已临时连接: ${username}@${connId}（未保存配置）\n后续操作使用 server_id="${connId}"`);
+    return text(`Temporarily connected: ${username}@${connId} (not saved)\nUse server_id="${connId}" for subsequent operations`);
   },
 );
 
 server.tool(
   'disconnect',
-  '断开服务器连接',
-  { server_id: z.string().optional().describe('服务器ID。留空则断开所有连接') },
+  'Disconnect from server',
+  { server_id: z.string().optional().describe('Server ID. Leave empty to disconnect all') },
   async ({ server_id }) => {
     if (!server_id) {
-      // 断开全部
+      // Disconnect all
       const ids = [...pool.keys()];
-      if (ids.length === 0) return text('当前没有活跃连接');
+      if (ids.length === 0) return text('No active connections');
       for (const [id, ssh] of pool.entries()) {
         await ssh.disconnect();
         pool.delete(id);
       }
-      return text(`已断开所有连接 (${ids.length} 个): ${ids.join(', ')}`);
+      return text(`Disconnected all (${ids.length}): ${ids.join(', ')}`);
     }
 
     const ssh = pool.get(server_id);
-    if (!ssh?.isConnected()) return text(`没有活跃连接: ${server_id}`);
+    if (!ssh?.isConnected()) return text(`No active connection: ${server_id}`);
     await ssh.disconnect();
     pool.delete(server_id);
-    return text(`已断开: ${server_id}`);
+    return text(`Disconnected: ${server_id}`);
   },
 );
 
 server.tool(
   'test_connection',
-  '测试服务器连通性（不影响现有连接）',
-  { server_id: z.string().describe('服务器ID') },
+  'Test server connectivity (does not affect existing connections)',
+  { server_id: z.string().describe('Server ID') },
   async ({ server_id }) => {
     const s = config.getServer(server_id);
-    if (!s) return text(`服务器不存在: ${server_id}`);
+    if (!s) return text(`Server not found: ${server_id}`);
 
     const proxy = s.proxy ? config.getProxy(s.proxy) ?? undefined : undefined;
     const jump = s.jumpHost ? config.getServer(s.jumpHost) ?? undefined : undefined;
@@ -248,21 +248,21 @@ server.tool(
     const tmp = new SshManager();
     const ok = await tmp.testConnection(s, proxy, jump);
     return text(ok
-      ? `✅ 连接成功: ${s.name} (${s.host}:${s.port})`
-      : `❌ 连接失败: ${s.host}\n原因: ${tmp.lastError}`
+      ? `✅ Connection successful: ${s.name} (${s.host}:${s.port})`
+      : `❌ Connection failed: ${s.host}\nReason: ${tmp.lastError}`
     );
   },
 );
 
-// ── 命令执行 ──────────────────────────────────────────────
+// ── Command Execution ──────────────────────────────────────────────
 
 server.tool(
   'execute',
-  '在远程服务器执行 shell 命令',
+  'Execute shell command on remote server',
   {
     server_id: serverIdParam,
-    command: z.string().describe('要执行的命令'),
-    timeout: z.number().int().optional().default(30).describe('超时秒数，默认 30'),
+    command: z.string().describe('Command to execute'),
+    timeout: z.number().int().optional().default(30).describe('Timeout in seconds, default 30'),
   },
   async ({ server_id, command, timeout }) => {
     const r = await getConnection(server_id);
@@ -273,20 +273,20 @@ server.tool(
     const status = ok ? 'OK' : 'FAILED';
     let result = stdout || '';
     if (stderr) result += `\n[STDERR] ${stderr}`;
-    if (!result.trim()) result = '(无输出)';
+    if (!result.trim()) result = '(no output)';
     return text(`${label}[${status}] ${command}\n${result}`);
   },
 );
 
-// ── 文件操作 ──────────────────────────────────────────────
+// ── File Operations ──────────────────────────────────────────────
 
 server.tool(
   'write_file',
-  '将内容写入远程文件（覆盖写入）',
+  'Write content to remote file (overwrite)',
   {
     server_id: serverIdParam,
-    remote_path: z.string().describe('远程文件路径'),
-    content: z.string().describe('要写入的文本内容'),
+    remote_path: z.string().describe('Remote file path'),
+    content: z.string().describe('Text content to write'),
   },
   async ({ server_id, remote_path, content }) => {
     const r = await getConnection(server_id);
@@ -294,21 +294,21 @@ server.tool(
     const { ssh, label } = r;
     try {
       await ssh.writeFile(remote_path, content);
-      return text(`${label}写入成功: ${remote_path}`);
+      return text(`${label}Written: ${remote_path}`);
     } catch (e) {
-      return text(`${label}写入失败: ${e}`);
+      return text(`${label}Write failed: ${e}`);
     }
   },
 );
 
 server.tool(
   'read_file',
-  '读取远程文件内容（支持行数限制，适合查看日志和配置文件）',
+  'Read remote file content (supports line range, suitable for logs and config files)',
   {
     server_id: serverIdParam,
-    remote_path: z.string().describe('远程文件路径'),
-    offset: z.number().int().optional().default(0).describe('起始行号（从 0 开始），默认 0'),
-    limit: z.number().int().optional().describe('读取行数，留空则读取全部'),
+    remote_path: z.string().describe('Remote file path'),
+    offset: z.number().int().optional().default(0).describe('Start line (0-based), default 0'),
+    limit: z.number().int().optional().describe('Number of lines to read. Leave empty for all'),
   },
   async ({ server_id, remote_path, offset, limit }) => {
     const r = await getConnection(server_id);
@@ -317,30 +317,30 @@ server.tool(
     try {
       const result = await ssh.readFile(remote_path, offset ?? 0, limit ?? undefined);
       const info = limit
-        ? `${label}${remote_path} (第 ${offset + 1}-${offset + result.readLines} 行，共 ${result.totalLines} 行)`
-        : `${label}${remote_path} (共 ${result.totalLines} 行)`;
+        ? `${label}${remote_path} (lines ${offset + 1}-${offset + result.readLines} of ${result.totalLines})`
+        : `${label}${remote_path} (${result.totalLines} lines)`;
       return text(`${info}\n${result.content}`);
     } catch (e) {
-      return text(`${label}读取失败: ${e}`);
+      return text(`${label}Read failed: ${e}`);
     }
   },
 );
 
 server.tool(
   'upload_file',
-  '上传本地文件到远程服务器（路径直传，不占 Token。大文件可用 async 模式后台传输）',
+  'Upload local file to remote server (path-based, zero token cost. Use async mode for large files)',
   {
     server_id: serverIdParam,
-    local_path: z.string().describe('本地文件绝对路径'),
-    remote_path: z.string().describe('远程目标路径'),
-    async_transfer: z.boolean().optional().default(false).describe('大文件建议开启，后台传输并返回任务ID，用 transfer_status 查进度'),
-    skip_same: z.boolean().optional().default(false).describe('MD5 去重：远程文件 MD5 相同则跳过上传，节省流量和时间'),
+    local_path: z.string().describe('Local file absolute path'),
+    remote_path: z.string().describe('Remote destination path'),
+    async_transfer: z.boolean().optional().default(false).describe('Recommended for large files. Runs in background and returns task ID. Use transfer_status to check progress'),
+    skip_same: z.boolean().optional().default(false).describe('MD5 dedup: skip upload if remote file has same MD5, saving bandwidth and time'),
   },
   async ({ server_id, local_path, remote_path, async_transfer, skip_same }) => {
     const r = await getConnection(server_id);
     if ('error' in r) return text(r.error);
     const { ssh, label } = r;
-    if (!fs.existsSync(local_path)) return text(`本地文件不存在: ${local_path}`);
+    if (!fs.existsSync(local_path)) return text(`Local file not found: ${local_path}`);
 
     if (async_transfer) {
       const id = newTransferId();
@@ -350,36 +350,36 @@ server.tool(
         .then((res) => { task.status = 'done'; task.result = res; })
         .catch((e) => { task.status = 'error'; task.error = String(e); });
       const size = fs.statSync(local_path).size;
-      return text(`${label}后台上传已启动: ${id}\n${local_path} → ${remote_path} (${formatSize(size)})${skip_same ? ' [MD5去重]' : ''}\n用 transfer_status("${id}") 查看进度`);
+      return text(`${label}Background upload started: ${id}\n${local_path} → ${remote_path} (${formatSize(size)})${skip_same ? ' [MD5 dedup]' : ''}\nUse transfer_status("${id}") to check progress`);
     }
 
     try {
       const res = await ssh.uploadFile(local_path, remote_path, undefined, skip_same);
       if (res.skipped) {
-        return text(`${label}跳过上传（MD5 相同）: ${local_path} → ${remote_path}`);
+        return text(`${label}Skipped (same MD5): ${local_path} → ${remote_path}`);
       }
-      return text(`${label}上传成功: ${local_path} → ${remote_path}\n${formatTransferResult(res)}`);
+      return text(`${label}Uploaded: ${local_path} → ${remote_path}\n${formatTransferResult(res)}`);
     } catch (e) {
-      return text(`${label}上传失败: ${e}`);
+      return text(`${label}Upload failed: ${e}`);
     }
   },
 );
 
 server.tool(
   'upload_directory',
-  '上传本地目录到远程服务器（自动压缩传输再解压。大文件可用 async 模式）',
+  'Upload local directory to remote server (auto compress, transfer, and extract. Use async for large dirs)',
   {
     server_id: serverIdParam,
-    local_path: z.string().describe('本地目录绝对路径'),
-    remote_path: z.string().describe('远程目标路径'),
-    async_transfer: z.boolean().optional().default(false).describe('大目录建议开启，后台传输并返回任务ID'),
-    skip_same: z.boolean().optional().default(false).describe('MD5 去重：跳过远程已存在且 MD5 相同的文件，只上传有变化的文件'),
+    local_path: z.string().describe('Local directory absolute path'),
+    remote_path: z.string().describe('Remote destination path'),
+    async_transfer: z.boolean().optional().default(false).describe('Recommended for large directories. Runs in background and returns task ID'),
+    skip_same: z.boolean().optional().default(false).describe('MD5 dedup: skip unchanged files (same MD5), only upload modified/new files'),
   },
   async ({ server_id, local_path, remote_path, async_transfer, skip_same }) => {
     const r = await getConnection(server_id);
     if ('error' in r) return text(r.error);
     const { ssh, label } = r;
-    if (!fs.existsSync(local_path)) return text(`本地目录不存在: ${local_path}`);
+    if (!fs.existsSync(local_path)) return text(`Local directory not found: ${local_path}`);
 
     if (async_transfer) {
       const id = newTransferId();
@@ -388,33 +388,33 @@ server.tool(
       ssh.uploadDirectory(local_path, remote_path, (p) => { task.progress = p; }, skip_same)
         .then((res) => { task.status = 'done'; task.result = res; })
         .catch((e) => { task.status = 'error'; task.error = String(e); });
-      return text(`${label}后台目录上传已启动: ${id}\n${local_path} → ${remote_path}${skip_same ? ' [MD5去重]' : ''}\n用 transfer_status("${id}") 查看进度`);
+      return text(`${label}Background directory upload started: ${id}\n${local_path} → ${remote_path}${skip_same ? ' [MD5 dedup]' : ''}\nUse transfer_status("${id}") to check progress`);
     }
 
     try {
       const res = await ssh.uploadDirectory(local_path, remote_path, undefined, skip_same);
-      const skippedInfo = res.skippedFiles ? `，跳过 ${res.skippedFiles} 个相同文件` : '';
+      const skippedInfo = res.skippedFiles ? `, ${res.skippedFiles} unchanged skipped` : '';
       const remoteOnlyInfo = res.remoteOnly?.length
-        ? `\n\n⚠️ 远程存在 ${res.remoteOnly.length} 个本地没有的文件（可能是旧版本残留）:\n${res.remoteOnly.map(f => `  - ${f}`).join('\n')}`
+        ? `\n\n⚠️ ${res.remoteOnly.length} files exist on remote but not locally (possibly stale/outdated):\n${res.remoteOnly.map(f => `  - ${f}`).join('\n')}`
         : '';
       if (res.files === 0 && res.skippedFiles) {
-        return text(`${label}全部跳过（MD5 均相同）: ${local_path} → ${remote_path}\n共 ${res.skippedFiles} 个文件无需更新${remoteOnlyInfo}`);
+        return text(`${label}All skipped (MD5 identical): ${local_path} → ${remote_path}\n${res.skippedFiles} files unchanged, no update needed${remoteOnlyInfo}`);
       }
-      return text(`${label}目录上传成功: ${local_path} → ${remote_path}\n${formatTransferResult(res, `${res.files} 个文件${skippedInfo}`)}${remoteOnlyInfo}`);
+      return text(`${label}Directory uploaded: ${local_path} → ${remote_path}\n${formatTransferResult(res, `${res.files} files${skippedInfo}`)}${remoteOnlyInfo}`);
     } catch (e) {
-      return text(`${label}目录上传失败: ${e}`);
+      return text(`${label}Directory upload failed: ${e}`);
     }
   },
 );
 
 server.tool(
   'download_file',
-  '从远程服务器下载文件到本地（大文件可用 async 模式后台传输）',
+  'Download file from remote server (use async mode for large files)',
   {
     server_id: serverIdParam,
-    remote_path: z.string().describe('远程文件路径'),
-    local_path: z.string().optional().describe('本地保存路径，留空则保存到当前目录'),
-    async_transfer: z.boolean().optional().default(false).describe('大文件建议开启，后台传输并返回任务ID'),
+    remote_path: z.string().describe('Remote file path'),
+    local_path: z.string().optional().describe('Local save path. Leave empty to save in current directory'),
+    async_transfer: z.boolean().optional().default(false).describe('Recommended for large files. Runs in background and returns task ID'),
   },
   async ({ server_id, remote_path, local_path, async_transfer }) => {
     const r = await getConnection(server_id);
@@ -429,26 +429,26 @@ server.tool(
       ssh.downloadFile(remote_path, savePath, (p) => { task.progress = p; })
         .then((res) => { task.status = 'done'; task.result = res; })
         .catch((e) => { task.status = 'error'; task.error = String(e); });
-      return text(`${label}后台下载已启动: ${id}\n${remote_path} → ${savePath}\n用 transfer_status("${id}") 查看进度`);
+      return text(`${label}Background download started: ${id}\n${remote_path} → ${savePath}\nUse transfer_status("${id}") to check progress`);
     }
 
     try {
       const res = await ssh.downloadFile(remote_path, savePath);
-      return text(`${label}下载成功: ${remote_path} → ${savePath}\n${formatTransferResult(res)}`);
+      return text(`${label}Downloaded: ${remote_path} → ${savePath}\n${formatTransferResult(res)}`);
     } catch (e) {
-      return text(`${label}下载失败: ${e}`);
+      return text(`${label}Download failed: ${e}`);
     }
   },
 );
 
 server.tool(
   'download_directory',
-  '下载远程目录到本地（远程压缩 → 下载 → 本地解压。大目录可用 async 模式）',
+  'Download remote directory (remote compress → download → local extract. Use async for large dirs)',
   {
     server_id: serverIdParam,
-    remote_path: z.string().describe('远程目录路径'),
-    local_path: z.string().describe('本地保存路径'),
-    async_transfer: z.boolean().optional().default(false).describe('大目录建议开启，后台传输并返回任务ID'),
+    remote_path: z.string().describe('Remote directory path'),
+    local_path: z.string().describe('Local save path'),
+    async_transfer: z.boolean().optional().default(false).describe('Recommended for large directories. Runs in background and returns task ID'),
   },
   async ({ server_id, remote_path, local_path, async_transfer }) => {
     const r = await getConnection(server_id);
@@ -462,93 +462,93 @@ server.tool(
       ssh.downloadDirectory(remote_path, local_path, (p) => { task.progress = p; })
         .then((res) => { task.status = 'done'; task.result = res; })
         .catch((e) => { task.status = 'error'; task.error = String(e); });
-      return text(`${label}后台目录下载已启动: ${id}\n${remote_path} → ${local_path}\n用 transfer_status("${id}") 查看进度`);
+      return text(`${label}Background directory download started: ${id}\n${remote_path} → ${local_path}\nUse transfer_status("${id}") to check progress`);
     }
 
     try {
       const res = await ssh.downloadDirectory(remote_path, local_path);
-      return text(`${label}目录下载成功: ${remote_path} → ${local_path}\n${formatTransferResult(res, `${res.files} 个文件`)}`);
+      return text(`${label}Directory downloaded: ${remote_path} → ${local_path}\n${formatTransferResult(res, `${res.files} files`)}`);
     } catch (e) {
-      return text(`${label}目录下载失败: ${e}`);
+      return text(`${label}Directory download failed: ${e}`);
     }
   },
 );
 
 server.tool(
   'transfer_status',
-  '查看后台传输任务的进度（配合 async_transfer=true 使用）',
+  'Check background transfer task progress (use with async_transfer=true)',
   {
-    task_id: z.string().optional().describe('任务ID，如 tf_1。留空则列出所有任务'),
+    task_id: z.string().optional().describe('Task ID, e.g. tf_1. Leave empty to list all tasks'),
   },
   async ({ task_id }) => {
     if (!task_id) {
-      if (transfers.size === 0) return text('没有传输任务');
+      if (transfers.size === 0) return text('No transfer tasks');
       const lines = [...transfers.values()].map((t) => {
         const dir = t.type === 'download' ? '↓' : '↑';
         const srv = `[${t.serverId}]`;
         if (t.status === 'done' && t.result)
-          return `  ${t.id} ${srv} ${dir} ✅ 完成 — ${formatTransferResult(t.result)}`;
+          return `  ${t.id} ${srv} ${dir} ✅ Done — ${formatTransferResult(t.result)}`;
         if (t.status === 'error')
-          return `  ${t.id} ${srv} ${dir} ❌ 失败 — ${t.error}`;
+          return `  ${t.id} ${srv} ${dir} ❌ Failed — ${t.error}`;
         if (t.progress)
           return `  ${t.id} ${srv} ${dir} 🔄 ${formatProgress(t.progress)}`;
-        return `  ${t.id} ${srv} ${dir} 🔄 准备中...`;
+        return `  ${t.id} ${srv} ${dir} 🔄 Preparing...`;
       });
-      return text('传输任务:\n' + lines.join('\n'));
+      return text('Transfer tasks:\n' + lines.join('\n'));
     }
 
     const t = transfers.get(task_id);
-    if (!t) return text(`任务不存在: ${task_id}`);
+    if (!t) return text(`Task not found: ${task_id}`);
 
-    const dir = t.type === 'download' ? '下载' : '上传';
+    const dir = t.type === 'download' ? 'Download' : 'Upload';
     const pathInfo = `${t.localPath} ↔ ${t.remotePath}`;
 
     if (t.status === 'done' && t.result) {
-      return text(`[${t.serverId}] ✅ ${dir}完成: ${pathInfo}\n${formatTransferResult(t.result)}`);
+      return text(`[${t.serverId}] ✅ ${dir} complete: ${pathInfo}\n${formatTransferResult(t.result)}`);
     }
     if (t.status === 'error') {
-      return text(`[${t.serverId}] ❌ ${dir}失败: ${pathInfo}\n原因: ${t.error}`);
+      return text(`[${t.serverId}] ❌ ${dir} failed: ${pathInfo}\nReason: ${t.error}`);
     }
     if (t.progress) {
       const elapsed = Date.now() - t.startTime;
       const remaining = t.progress.speed > 0
         ? (t.progress.total - t.progress.transferred) / t.progress.speed
         : 0;
-      return text(`[${t.serverId}] 🔄 ${dir}中: ${pathInfo}\n${formatProgress(t.progress)}\n已耗时 ${formatElapsed(elapsed)}，预计剩余 ${formatElapsed(remaining * 1000)}`);
+      return text(`[${t.serverId}] 🔄 ${dir} in progress: ${pathInfo}\n${formatProgress(t.progress)}\nElapsed ${formatElapsed(elapsed)}, ETA ${formatElapsed(remaining * 1000)}`);
     }
-    return text(`[${t.serverId}] 🔄 ${dir}准备中: ${pathInfo}`);
+    return text(`[${t.serverId}] 🔄 ${dir} preparing: ${pathInfo}`);
   },
 );
 
-// ── 服务器配置管理 ────────────────────────────────────────
+// ── Server Config Management ────────────────────────────────────────
 
 server.tool(
   'add_server',
-  '添加或更新服务器配置',
+  'Add or update server configuration',
   {
-    server_id: z.string().describe('服务器ID（唯一标识）'),
-    name: z.string().describe('服务器名称'),
-    host: z.string().describe('IP 地址或域名'),
-    port: z.number().int().default(22).describe('SSH 端口，默认 22'),
-    username: z.string().describe('SSH 用户名'),
-    password: z.string().optional().describe('SSH 密码'),
-    private_key: z.string().optional().describe('私钥文件路径（文件必须存在）'),
-    private_key_content: z.string().optional().describe('私钥内容字符串（优先于 private_key）'),
-    passphrase: z.string().optional().describe('私钥密码短语'),
-    use_agent: z.boolean().optional().describe('使用系统 ssh-agent'),
-    keyboard_interactive: z.boolean().optional().describe('启用键盘交互式认证（OTP/2FA）'),
-    proxy: z.string().optional().describe('SOCKS5/4 代理预设ID，留空直连'),
-    jump_host: z.string().optional().describe('跳板机服务器ID（ProxyJump）'),
+    server_id: z.string().describe('Server ID (unique identifier)'),
+    name: z.string().describe('Server name'),
+    host: z.string().describe('IP address or hostname'),
+    port: z.number().int().default(22).describe('SSH port, default 22'),
+    username: z.string().describe('SSH username'),
+    password: z.string().optional().describe('SSH password'),
+    private_key: z.string().optional().describe('Private key file path (file must exist)'),
+    private_key_content: z.string().optional().describe('Private key content string (takes priority over private_key)'),
+    passphrase: z.string().optional().describe('Private key passphrase'),
+    use_agent: z.boolean().optional().describe('Use system ssh-agent'),
+    keyboard_interactive: z.boolean().optional().describe('Enable keyboard-interactive auth (OTP/2FA)'),
+    proxy: z.string().optional().describe('SOCKS5/4 proxy preset ID. Leave empty for direct connection'),
+    jump_host: z.string().optional().describe('Jump host server ID (ProxyJump)'),
   },
   async ({ server_id, name, host, port, username, password, private_key,
     private_key_content, passphrase, use_agent, keyboard_interactive, proxy, jump_host }) => {
 
     if (proxy && !config.getProxy(proxy))
-      return text(`代理不存在: ${proxy}，请先用 add_proxy 添加。`);
+      return text(`Proxy not found: ${proxy}. Use add_proxy to add it first.`);
     if (jump_host && !config.getServer(jump_host))
-      return text(`跳板机不存在: ${jump_host}，请先用 add_server 添加。`);
+      return text(`Jump host not found: ${jump_host}. Use add_server to add it first.`);
     if (private_key && !fs.existsSync(private_key))
-      return text(`私钥文件不存在: ${private_key}`);
+      return text(`Private key file not found: ${private_key}`);
 
     config.addServer(server_id, {
       name, host, port, username,
@@ -563,46 +563,46 @@ server.tool(
     });
 
     const tags = [
-      proxy ? `代理: ${proxy}` : '',
-      jump_host ? `跳板: ${jump_host}` : '',
+      proxy ? `proxy: ${proxy}` : '',
+      jump_host ? `jump: ${jump_host}` : '',
       use_agent ? 'agent' : '',
       keyboard_interactive ? 'kbd-interactive' : '',
     ].filter(Boolean).join(', ');
 
-    return text(`服务器已保存: ${server_id} (${host}:${port})${tags ? `  [${tags}]` : ''}`);
+    return text(`Server saved: ${server_id} (${host}:${port})${tags ? `  [${tags}]` : ''}`);
   },
 );
 
 server.tool(
   'update_server',
-  '修改服务器配置（只传要改的字段，其余保持不变）',
+  'Update server configuration (only pass fields to change, rest unchanged)',
   {
-    server_id: z.string().describe('服务器ID'),
-    name: z.string().optional().describe('服务器名称'),
-    host: z.string().optional().describe('IP 地址或域名'),
-    port: z.number().int().optional().describe('SSH 端口'),
-    username: z.string().optional().describe('SSH 用户名'),
-    password: z.string().optional().describe('SSH 密码（传空字符串可清除）'),
-    private_key: z.string().optional().describe('私钥文件路径（传空字符串可清除）'),
-    private_key_content: z.string().optional().describe('私钥内容字符串（传空字符串可清除）'),
-    passphrase: z.string().optional().describe('私钥密码短语（传空字符串可清除）'),
-    use_agent: z.boolean().optional().describe('使用系统 ssh-agent'),
-    keyboard_interactive: z.boolean().optional().describe('启用键盘交互式认证'),
-    proxy: z.string().optional().describe('代理预设ID（传空字符串可清除）'),
-    jump_host: z.string().optional().describe('跳板机ID（传空字符串可清除）'),
+    server_id: z.string().describe('Server ID'),
+    name: z.string().optional().describe('Server name'),
+    host: z.string().optional().describe('IP address or hostname'),
+    port: z.number().int().optional().describe('SSH port'),
+    username: z.string().optional().describe('SSH username'),
+    password: z.string().optional().describe('SSH password (empty string to clear)'),
+    private_key: z.string().optional().describe('Private key file path (empty string to clear)'),
+    private_key_content: z.string().optional().describe('Private key content string (empty string to clear)'),
+    passphrase: z.string().optional().describe('Private key passphrase (empty string to clear)'),
+    use_agent: z.boolean().optional().describe('Use system ssh-agent'),
+    keyboard_interactive: z.boolean().optional().describe('Enable keyboard-interactive auth'),
+    proxy: z.string().optional().describe('Proxy preset ID (empty string to clear)'),
+    jump_host: z.string().optional().describe('Jump host ID (empty string to clear)'),
   },
   async ({ server_id, name, host, port, username, password, private_key,
     private_key_content, passphrase, use_agent, keyboard_interactive, proxy, jump_host }) => {
 
     const existing = config.getServer(server_id);
-    if (!existing) return text(`服务器不存在: ${server_id}`);
+    if (!existing) return text(`Server not found: ${server_id}`);
 
     if (proxy && proxy !== '' && !config.getProxy(proxy))
-      return text(`代理不存在: ${proxy}，请先用 add_proxy 添加。`);
+      return text(`Proxy not found: ${proxy}. Use add_proxy to add it first.`);
     if (jump_host && jump_host !== '' && !config.getServer(jump_host))
-      return text(`跳板机不存在: ${jump_host}，请先用 add_server 添加。`);
+      return text(`Jump host not found: ${jump_host}. Use add_server to add it first.`);
     if (private_key && private_key !== '' && !fs.existsSync(private_key))
-      return text(`私钥文件不存在: ${private_key}`);
+      return text(`Private key file not found: ${private_key}`);
 
     const updates: Record<string, any> = {};
     if (name !== undefined) updates.name = name;
@@ -620,7 +620,7 @@ server.tool(
 
     config.updateServer(server_id, updates);
 
-    // 如果改了连接相关配置，断开旧连接让下次自动重连
+    // If connection-related config changed, disconnect to auto-reconnect next time
     const connFields = ['host', 'port', 'username', 'password', 'privateKey', 'privateKeyContent', 'passphrase', 'useAgent', 'keyboardInteractive', 'proxy', 'jumpHost'];
     const changedConn = Object.keys(updates).some(k => connFields.includes(k));
     if (changedConn) {
@@ -630,36 +630,36 @@ server.tool(
 
     const changed = Object.keys(updates).map(k => {
       const v = updates[k];
-      if (k === 'password' || k === 'passphrase' || k === 'privateKeyContent') return v ? `${k}: ***` : `${k}: (已清除)`;
-      return v === null ? `${k}: (已清除)` : `${k}: ${v}`;
+      if (k === 'password' || k === 'passphrase' || k === 'privateKeyContent') return v ? `${k}: ***` : `${k}: (cleared)`;
+      return v === null ? `${k}: (cleared)` : `${k}: ${v}`;
     });
-    return text(`服务器已更新: ${server_id}\n修改: ${changed.join(', ')}${changedConn ? '\n（连接配置已变更，下次操作将自动重连）' : ''}`);
+    return text(`Server updated: ${server_id}\nChanged: ${changed.join(', ')}${changedConn ? '\n(connection config changed, will auto-reconnect on next operation)' : ''}`);
   },
 );
 
 server.tool(
   'delete_server',
-  '删除服务器配置',
-  { server_id: z.string().describe('服务器ID') },
+  'Delete server configuration',
+  { server_id: z.string().describe('Server ID') },
   async ({ server_id }) => {
-    // 同时断开连接
+    // Also disconnect
     const ssh = pool.get(server_id);
     if (ssh) { await ssh.disconnect(); pool.delete(server_id); }
     const ok = config.deleteServer(server_id);
-    return text(ok ? `服务器已删除: ${server_id}` : `服务器不存在: ${server_id}`);
+    return text(ok ? `Server deleted: ${server_id}` : `Server not found: ${server_id}`);
   },
 );
 
 server.tool(
   'rename_server',
-  '重命名服务器ID（别名）',
+  'Rename server ID (alias)',
   {
-    old_id: z.string().describe('当前服务器ID'),
-    new_id: z.string().describe('新的服务器ID'),
+    old_id: z.string().describe('Current server ID'),
+    new_id: z.string().describe('New server ID'),
   },
   async ({ old_id, new_id }) => {
-    if (old_id === new_id) return text('新旧 ID 相同，无需修改');
-    // 连接池也要迁移
+    if (old_id === new_id) return text('Old and new ID are the same, no change needed');
+    // Migrate connection pool entry
     const ssh = pool.get(old_id);
     if (ssh) {
       pool.set(new_id, ssh);
@@ -667,39 +667,39 @@ server.tool(
     }
     const ok = config.renameServer(old_id, new_id);
     if (!ok) {
-      // 回滚连接池
+      // Rollback connection pool
       if (ssh) { pool.set(old_id, ssh); pool.delete(new_id); }
-      return text(config.getServer(new_id) ? `新 ID 已被占用: ${new_id}` : `服务器不存在: ${old_id}`);
+      return text(config.getServer(new_id) ? `New ID already taken: ${new_id}` : `Server not found: ${old_id}`);
     }
-    return text(`重命名成功: ${old_id} → ${new_id}`);
+    return text(`Renamed: ${old_id} → ${new_id}`);
   },
 );
 
-// ── 代理配置管理 ──────────────────────────────────────────
+// ── Proxy Config Management ──────────────────────────────────────────
 
-server.tool('list_proxies', '列出所有已配置的 SOCKS 代理', {}, async () => {
+server.tool('list_proxies', 'List all configured SOCKS proxies', {}, async () => {
   const proxies = config.getProxies();
   if (Object.keys(proxies).length === 0)
-    return text('没有已配置的代理，请使用 add_proxy 添加。');
+    return text('No configured proxies. Use add_proxy to add one.');
 
   const lines = Object.entries(proxies).map(([id, p]) => {
-    const auth = p.username ? `，认证: ${p.username}` : '';
+    const auth = p.username ? `, auth: ${p.username}` : '';
     return `  ${id}: ${p.name} SOCKS${p.type ?? 5} (${p.host}:${p.port}${auth})`;
   });
-  return text('已配置的代理:\n' + lines.join('\n'));
+  return text('Configured proxies:\n' + lines.join('\n'));
 });
 
 server.tool(
   'add_proxy',
-  '添加或更新 SOCKS 代理预设',
+  'Add or update SOCKS proxy preset',
   {
-    proxy_id: z.string().describe('代理ID（唯一标识）'),
-    name: z.string().describe('代理名称'),
-    host: z.string().describe('代理服务器地址'),
-    port: z.number().int().describe('代理端口'),
-    type: z.enum(['4', '5']).optional().default('5').describe('SOCKS 版本，4 或 5，默认 5'),
-    username: z.string().optional().describe('认证用户名（可选）'),
-    password: z.string().optional().describe('认证密码（可选）'),
+    proxy_id: z.string().describe('Proxy ID (unique identifier)'),
+    name: z.string().describe('Proxy name'),
+    host: z.string().describe('Proxy server address'),
+    port: z.number().int().describe('Proxy port'),
+    type: z.enum(['4', '5']).optional().default('5').describe('SOCKS version, 4 or 5, default 5'),
+    username: z.string().optional().describe('Auth username (optional)'),
+    password: z.string().optional().describe('Auth password (optional)'),
   },
   async ({ proxy_id, name, host, port, type, username, password }) => {
     config.addProxy(proxy_id, {
@@ -708,21 +708,21 @@ server.tool(
       ...(username ? { username } : {}),
       ...(password ? { password } : {}),
     });
-    return text(`代理已保存: ${proxy_id} SOCKS${type ?? 5} (${host}:${port})`);
+    return text(`Proxy saved: ${proxy_id} SOCKS${type ?? 5} (${host}:${port})`);
   },
 );
 
 server.tool(
   'delete_proxy',
-  '删除代理预设',
-  { proxy_id: z.string().describe('代理ID') },
+  'Delete proxy preset',
+  { proxy_id: z.string().describe('Proxy ID') },
   async ({ proxy_id }) => {
     const ok = config.deleteProxy(proxy_id);
-    return text(ok ? `代理已删除: ${proxy_id}` : `代理不存在: ${proxy_id}`);
+    return text(ok ? `Proxy deleted: ${proxy_id}` : `Proxy not found: ${proxy_id}`);
   },
 );
 
-// ── 启动 ──────────────────────────────────────────────────
+// ── Start ──────────────────────────────────────────────────
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
