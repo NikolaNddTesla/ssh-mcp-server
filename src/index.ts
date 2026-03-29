@@ -334,8 +334,9 @@ server.tool(
     local_path: z.string().describe('本地文件绝对路径'),
     remote_path: z.string().describe('远程目标路径'),
     async_transfer: z.boolean().optional().default(false).describe('大文件建议开启，后台传输并返回任务ID，用 transfer_status 查进度'),
+    skip_same: z.boolean().optional().default(false).describe('MD5 去重：远程文件 MD5 相同则跳过上传，节省流量和时间'),
   },
-  async ({ server_id, local_path, remote_path, async_transfer }) => {
+  async ({ server_id, local_path, remote_path, async_transfer, skip_same }) => {
     const r = await getConnection(server_id);
     if ('error' in r) return text(r.error);
     const { ssh, label } = r;
@@ -345,15 +346,18 @@ server.tool(
       const id = newTransferId();
       const task: TransferTask = { id, serverId: server_id, type: 'upload', localPath: local_path, remotePath: remote_path, status: 'running', progress: null, result: null, error: null, startTime: Date.now() };
       transfers.set(id, task);
-      ssh.uploadFile(local_path, remote_path, (p) => { task.progress = p; })
+      ssh.uploadFile(local_path, remote_path, (p) => { task.progress = p; }, skip_same)
         .then((res) => { task.status = 'done'; task.result = res; })
         .catch((e) => { task.status = 'error'; task.error = String(e); });
       const size = fs.statSync(local_path).size;
-      return text(`${label}后台上传已启动: ${id}\n${local_path} → ${remote_path} (${formatSize(size)})\n用 transfer_status("${id}") 查看进度`);
+      return text(`${label}后台上传已启动: ${id}\n${local_path} → ${remote_path} (${formatSize(size)})${skip_same ? ' [MD5去重]' : ''}\n用 transfer_status("${id}") 查看进度`);
     }
 
     try {
-      const res = await ssh.uploadFile(local_path, remote_path);
+      const res = await ssh.uploadFile(local_path, remote_path, undefined, skip_same);
+      if (res.skipped) {
+        return text(`${label}跳过上传（MD5 相同）: ${local_path} → ${remote_path}`);
+      }
       return text(`${label}上传成功: ${local_path} → ${remote_path}\n${formatTransferResult(res)}`);
     } catch (e) {
       return text(`${label}上传失败: ${e}`);
@@ -369,8 +373,9 @@ server.tool(
     local_path: z.string().describe('本地目录绝对路径'),
     remote_path: z.string().describe('远程目标路径'),
     async_transfer: z.boolean().optional().default(false).describe('大目录建议开启，后台传输并返回任务ID'),
+    skip_same: z.boolean().optional().default(false).describe('MD5 去重：跳过远程已存在且 MD5 相同的文件，只上传有变化的文件'),
   },
-  async ({ server_id, local_path, remote_path, async_transfer }) => {
+  async ({ server_id, local_path, remote_path, async_transfer, skip_same }) => {
     const r = await getConnection(server_id);
     if ('error' in r) return text(r.error);
     const { ssh, label } = r;
@@ -380,15 +385,22 @@ server.tool(
       const id = newTransferId();
       const task: TransferTask = { id, serverId: server_id, type: 'upload_dir', localPath: local_path, remotePath: remote_path, status: 'running', progress: null, result: null, error: null, startTime: Date.now() };
       transfers.set(id, task);
-      ssh.uploadDirectory(local_path, remote_path, (p) => { task.progress = p; })
+      ssh.uploadDirectory(local_path, remote_path, (p) => { task.progress = p; }, skip_same)
         .then((res) => { task.status = 'done'; task.result = res; })
         .catch((e) => { task.status = 'error'; task.error = String(e); });
-      return text(`${label}后台目录上传已启动: ${id}\n${local_path} → ${remote_path}\n用 transfer_status("${id}") 查看进度`);
+      return text(`${label}后台目录上传已启动: ${id}\n${local_path} → ${remote_path}${skip_same ? ' [MD5去重]' : ''}\n用 transfer_status("${id}") 查看进度`);
     }
 
     try {
-      const res = await ssh.uploadDirectory(local_path, remote_path);
-      return text(`${label}目录上传成功: ${local_path} → ${remote_path}\n${formatTransferResult(res, `${res.files} 个文件`)}`);
+      const res = await ssh.uploadDirectory(local_path, remote_path, undefined, skip_same);
+      const skippedInfo = res.skippedFiles ? `，跳过 ${res.skippedFiles} 个相同文件` : '';
+      const remoteOnlyInfo = res.remoteOnly?.length
+        ? `\n\n⚠️ 远程存在 ${res.remoteOnly.length} 个本地没有的文件（可能是旧版本残留）:\n${res.remoteOnly.map(f => `  - ${f}`).join('\n')}`
+        : '';
+      if (res.files === 0 && res.skippedFiles) {
+        return text(`${label}全部跳过（MD5 均相同）: ${local_path} → ${remote_path}\n共 ${res.skippedFiles} 个文件无需更新${remoteOnlyInfo}`);
+      }
+      return text(`${label}目录上传成功: ${local_path} → ${remote_path}\n${formatTransferResult(res, `${res.files} 个文件${skippedInfo}`)}${remoteOnlyInfo}`);
     } catch (e) {
       return text(`${label}目录上传失败: ${e}`);
     }

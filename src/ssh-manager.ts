@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import net from 'net';
+import crypto from 'crypto';
 import { execSync } from 'child_process';
 import { Client, ConnectConfig, SFTPWrapper } from 'ssh2';
 import { SocksClient } from 'socks';
@@ -12,6 +13,9 @@ export interface TransferResult {
   files: number;
   elapsed: number;  // ms
   speed: number;    // bytes/s
+  skipped?: boolean;       // 单文件：MD5 相同已跳过
+  skippedFiles?: number;   // 目录：跳过的文件数
+  remoteOnly?: string[];   // 目录：远程有但本地没有的文件（可能是旧版本残留）
 }
 
 export interface TransferProgress {
@@ -212,9 +216,19 @@ export class SshManager {
     });
   }
 
-  async uploadFile(localPath: string, remotePath: string, onProgress?: OnProgress): Promise<TransferResult> {
-    const sftp = await this.getSftp();
+  async uploadFile(localPath: string, remotePath: string, onProgress?: OnProgress, skipSame?: boolean): Promise<TransferResult> {
     const stat = fs.statSync(localPath);
+
+    // MD5 去重：本地与远程相同则跳过
+    if (skipSame) {
+      const localMd5 = this.computeLocalMd5(localPath);
+      const remoteMd5 = await this.computeRemoteMd5(remotePath);
+      if (localMd5 && remoteMd5 && localMd5 === remoteMd5) {
+        return { bytes: 0, files: 1, elapsed: 0, speed: 0, skipped: true };
+      }
+    }
+
+    const sftp = await this.getSftp();
     const start = Date.now();
     await new Promise<void>((resolve, reject) => {
       sftp.fastPut(localPath, remotePath, {
@@ -256,21 +270,69 @@ export class SshManager {
    * 上传目录：本地 tar.gz 压缩 → SFTP 上传 → 远程解压 → 清理临时文件
    * 比逐文件上传快得多，尤其是大量小文件的场景。
    */
-  async uploadDirectory(localDir: string, remoteDir: string, onProgress?: OnProgress): Promise<TransferResult> {
-    // 统计本地文件数
-    const fileCount = this.countFiles(localDir);
+  async uploadDirectory(localDir: string, remoteDir: string, onProgress?: OnProgress, skipSame?: boolean): Promise<TransferResult> {
+    const allFiles = this.listFiles(localDir);
     const start = Date.now();
 
-    // 1. 本地压缩为 tar.gz
+    let filesToUpload = allFiles;
+    let skippedCount = 0;
+    let remoteOnly: string[] = [];
+    const localFileSet = new Set(allFiles);
+
+    // MD5 去重：只上传有变化的文件，同时找出远程多余文件
+    if (skipSame && allFiles.length > 0) {
+      const remoteMd5Map = await this.getRemoteMd5Map(remoteDir);
+      if (remoteMd5Map) {
+        filesToUpload = [];
+        for (const relPath of allFiles) {
+          const localMd5 = this.computeLocalMd5(path.join(localDir, relPath));
+          const remoteMd5 = remoteMd5Map.get(relPath);
+          if (localMd5 && remoteMd5 && localMd5 === remoteMd5) {
+            skippedCount++;
+          } else {
+            filesToUpload.push(relPath);
+          }
+        }
+        // 收集远程有但本地没有的文件
+        for (const remotePath of remoteMd5Map.keys()) {
+          if (!localFileSet.has(remotePath)) {
+            remoteOnly.push(remotePath);
+          }
+        }
+        // 全部相同，无需上传
+        if (filesToUpload.length === 0) {
+          return {
+            bytes: 0, files: 0, elapsed: Date.now() - start, speed: 0,
+            skippedFiles: skippedCount,
+            ...(remoteOnly.length > 0 ? { remoteOnly } : {}),
+          };
+        }
+      }
+    }
+
+    // 压缩为 tar.gz（skipSame 时只打包有变化的文件）
     const tmpName = `sshmcp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.tar.gz`;
     const tmpLocal = path.join(os.tmpdir(), tmpName);
     const remoteTar = `/tmp/${tmpName}`;
 
     try {
-      this.createTarGz(localDir, tmpLocal);
+      if (skipSame && filesToUpload.length < allFiles.length) {
+        // 写文件列表，只打包变化的文件
+        const listFile = path.join(os.tmpdir(), `sshmcp_filelist_${Date.now()}.txt`);
+        fs.writeFileSync(listFile, filesToUpload.join('\n'), 'utf-8');
+        try {
+          execSync(`tar -czf "${tmpLocal}" -C "${localDir}" -T "${listFile}"`, {
+            stdio: 'pipe', timeout: 300000,
+          });
+        } finally {
+          try { fs.unlinkSync(listFile); } catch { /* ignore */ }
+        }
+      } else {
+        this.createTarGz(localDir, tmpLocal);
+      }
       const tarSize = fs.statSync(tmpLocal).size;
 
-      // 2. SFTP 上传压缩包（带进度回调）
+      // SFTP 上传压缩包（带进度回调）
       const sftp = await this.getSftp();
       await new Promise<void>((resolve, reject) => {
         sftp.fastPut(tmpLocal, remoteTar, {
@@ -281,7 +343,7 @@ export class SshManager {
         } as any, (err) => (err ? reject(err) : resolve()));
       });
 
-      // 3. 远程解压
+      // 远程解压
       const { ok, stderr } = await this.execute(
         `mkdir -p ${remoteDir} && tar -xzf ${remoteTar} -C ${remoteDir} && rm -f ${remoteTar}`,
         120000,
@@ -292,7 +354,12 @@ export class SshManager {
       }
 
       const elapsed = Date.now() - start;
-      return { bytes: tarSize, files: fileCount, elapsed, speed: elapsed > 0 ? tarSize / (elapsed / 1000) : 0 };
+      return {
+        bytes: tarSize, files: filesToUpload.length, elapsed,
+        speed: elapsed > 0 ? tarSize / (elapsed / 1000) : 0,
+        ...(skippedCount > 0 ? { skippedFiles: skippedCount } : {}),
+        ...(remoteOnly.length > 0 ? { remoteOnly } : {}),
+      };
     } finally {
       try { fs.unlinkSync(tmpLocal); } catch { /* ignore */ }
     }
@@ -307,6 +374,51 @@ export class SshManager {
       else count++;
     }
     return count;
+  }
+
+  /** 递归列出目录下所有文件的相对路径 */
+  private listFiles(dir: string, base = ''): string[] {
+    const result: string[] = [];
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    for (const e of entries) {
+      const rel = base ? `${base}/${e.name}` : e.name;
+      if (e.isDirectory()) result.push(...this.listFiles(path.join(dir, e.name), rel));
+      else result.push(rel);
+    }
+    return result;
+  }
+
+  /** 计算本地文件 MD5 */
+  private computeLocalMd5(filePath: string): string {
+    const hash = crypto.createHash('md5');
+    const data = fs.readFileSync(filePath);
+    return hash.update(data).digest('hex');
+  }
+
+  /** 计算远程文件 MD5（文件不存在返回 null） */
+  private async computeRemoteMd5(remotePath: string): Promise<string | null> {
+    const { ok, stdout } = await this.execute(`md5sum "${remotePath}" 2>/dev/null | awk '{print $1}'`, 10000);
+    if (!ok || !stdout.trim()) return null;
+    return stdout.trim();
+  }
+
+  /** 获取远程目录所有文件的 MD5 映射（相对路径 → md5） */
+  private async getRemoteMd5Map(remoteDir: string): Promise<Map<string, string> | null> {
+    const { ok, stdout } = await this.execute(
+      `find "${remoteDir}" -type f -exec md5sum {} + 2>/dev/null`,
+      60000,
+    );
+    if (!ok || !stdout.trim()) return null;
+    const map = new Map<string, string>();
+    const prefix = remoteDir.endsWith('/') ? remoteDir : remoteDir + '/';
+    for (const line of stdout.trim().split('\n')) {
+      const match = line.match(/^([a-f0-9]{32})\s+(.+)$/);
+      if (match) {
+        const relPath = match[2].startsWith(prefix) ? match[2].slice(prefix.length) : match[2];
+        map.set(relPath, match[1]);
+      }
+    }
+    return map;
   }
 
   /** 使用系统 tar 命令创建 tar.gz（跨平台：Unix tar / Windows tar） */
