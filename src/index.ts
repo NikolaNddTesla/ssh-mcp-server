@@ -395,7 +395,7 @@ server.tool(
       const res = await ssh.uploadDirectory(local_path, remote_path, undefined, skip_same);
       const skippedInfo = res.skippedFiles ? `, ${res.skippedFiles} unchanged skipped` : '';
       const remoteOnlyInfo = res.remoteOnly?.length
-        ? `\n\n⚠️ ${res.remoteOnly.length} files exist on remote but not locally (possibly stale/outdated):\n${res.remoteOnly.map(f => `  - ${f}`).join('\n')}`
+        ? `\n\n⚠️ ${res.remoteOnly.length} files exist on remote but not locally (possibly stale/outdated):\n${res.remoteOnly.slice(0, 20).map(f => `  - ${f}`).join('\n')}${res.remoteOnly.length > 20 ? `\n  ... and ${res.remoteOnly.length - 20} more` : ''}`
         : '';
       if (res.files === 0 && res.skippedFiles) {
         return text(`${label}All skipped (MD5 identical): ${local_path} → ${remote_path}\n${res.skippedFiles} files unchanged, no update needed${remoteOnlyInfo}`);
