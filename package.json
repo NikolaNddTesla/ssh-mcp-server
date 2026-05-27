@@ -1,6 +1,7 @@
 {
   "name": "@nl4ever/sshmcp",
-  "version": "2.2.2",
+  "version": "2.2.3",
+  "mcpName": "io.github.nikolanddtesla/sshmcp",
   "description": "SSH MCP Server — Let AI manage remote servers via SSH with zero-token SFTP file transfer, proxy support, and multi-server management using Model Context Protocol",
   "keywords": [
     "mcp",
