@@ -4,7 +4,7 @@ import os from 'os';
 import net from 'net';
 import crypto from 'crypto';
 import { execSync } from 'child_process';
-import { Client, ConnectConfig, SFTPWrapper } from 'ssh2';
+import { Client, ClientChannel, ConnectConfig, SFTPWrapper } from 'ssh2';
 import { SocksClient } from 'socks';
 import { ServerConfig, ProxyConfig } from './types.js';
 
@@ -28,10 +28,44 @@ export interface TransferProgress {
 export type OnProgress = (progress: TransferProgress) => void;
 
 
+export interface StartCommandSpec {
+  /** Single-line or multi-line shell. Ignored when script is set. */
+  command?: string;
+  /** Remote script body. Written to a temp file and executed, then removed. */
+  script?: string;
+  pty?: boolean;
+  /** Bytes written to the remote stdin (or the PTY). Does not include the sudo password. */
+  stdin?: string;
+  /** Default true: prefix LC_ALL=C so remote errors stay in English. */
+  lcC?: boolean;
+  cwd?: string;
+  /** Run via `sudo -S -p ''` using sudoPassword. The password is not part of the command string. */
+  sudo?: boolean;
+  sudoPassword?: string;
+}
+
+export interface RunningExec {
+  stdout: string;
+  stderr: string;
+  exitCode: number | null;
+  closed: boolean;
+  error: string | null;
+  write(data: string): void;
+  close(): void;
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
 export class SshManager {
   private client: Client | null = null;
   private sftp: SFTPWrapper | null = null;
   public lastError = '';
+  /** auth: TCP/SSH up but login rejected. connect: could not open a session. */
+  public lastErrorKind: '' | 'auth' | 'connect' = '';
+  /** Config used for the current connection, including quick_connect. */
+  public connectedServer: ServerConfig | null = null;
 
   // ── Connection ──────────────────────────────────────────────
 
@@ -65,6 +99,8 @@ export class SshManager {
         c.on('error', reject);
         c.connect(connectCfg);
       });
+      this.connectedServer = server;
+      this.lastErrorKind = '';
 
       // Listen for disconnect, auto-cleanup state
       this.client!.on('close', () => {
@@ -79,6 +115,8 @@ export class SshManager {
       return true;
     } catch (e) {
       this.lastError = e instanceof Error ? e.message : String(e);
+      this.lastErrorKind = /authentication/i.test(this.lastError) ? 'auth' : 'connect';
+      this.connectedServer = null;
       return false;
     }
   }
@@ -160,6 +198,7 @@ export class SshManager {
   async disconnect(): Promise<void> {
     if (this.sftp) { this.sftp.end(); this.sftp = null; }
     if (this.client) { this.client.end(); this.client = null; }
+    this.connectedServer = null;
   }
 
   isConnected(): boolean {
@@ -200,6 +239,99 @@ export class SshManager {
         });
       });
     });
+  }
+
+  /**
+   * Start a command and return as soon as the channel is open.
+   * Multi-line command and script are written to a remote temp file so newlines
+   * and quotes reach the remote shell unchanged.
+   * Throws when the channel cannot be opened. A non-zero exit is not an error.
+   */
+  async startCommand(spec: StartCommandSpec): Promise<RunningExec> {
+    if (!this.client) throw new Error('Not connected to server');
+    const source = spec.script ?? spec.command;
+    if (source == null || source === '') throw new Error('command or script is required');
+    if (spec.sudo && !spec.sudoPassword) {
+      throw new Error('这台服务器没有保存口令，无法 sudo');
+    }
+
+    const useFile = spec.script != null || source.includes('\n');
+    let filePath: string | null = null;
+    if (useFile) {
+      filePath = await this.writeTempScript(source.endsWith('\n') ? source : `${source}\n`);
+    }
+
+    let inner = useFile
+      ? `sh ${shellQuote(filePath!)}; __rc=$?; rm -f ${shellQuote(filePath!)}; exit $__rc`
+      : source;
+    if (spec.cwd) inner = `cd ${shellQuote(spec.cwd)} || exit 1; ${inner}`;
+    if (spec.lcC !== false) inner = `export LC_ALL=C; ${inner}`;
+
+    const execLine = spec.sudo
+      ? `sudo -S -p '' sh -c ${shellQuote(inner)}`
+      : inner;
+
+    const stdinParts: string[] = [];
+    if (spec.sudo) stdinParts.push(`${spec.sudoPassword}\n`);
+    if (spec.stdin) stdinParts.push(spec.stdin);
+    const initialStdin = stdinParts.join('');
+    // A PTY stays open so session_write can send the next answer.
+    // Without a PTY, close stdin after the provided bytes so readers see EOF.
+    const endStdin = !spec.pty;
+
+    const stream = await new Promise<ClientChannel>((resolve, reject) => {
+      this.client!.exec(
+        execLine,
+        spec.pty ? { pty: { term: 'vt100', cols: 120, rows: 40 } } : {},
+        (err, ch) => (err ? reject(err) : resolve(ch)),
+      );
+    });
+
+    const running: RunningExec = {
+      stdout: '',
+      stderr: '',
+      exitCode: null,
+      closed: false,
+      error: null,
+      write(data: string) {
+        if (!running.closed) stream.write(data);
+      },
+      close() {
+        if (!running.closed) stream.close();
+      },
+    };
+
+    stream.on('data', (d: Buffer) => { running.stdout += d.toString(); });
+    stream.stderr?.on('data', (d: Buffer) => { running.stderr += d.toString(); });
+    stream.on('close', (code: number | null) => {
+      running.closed = true;
+      running.exitCode = typeof code === 'number' ? code : null;
+    });
+    stream.on('error', (err: Error) => {
+      running.error = err.message;
+    });
+
+    if (initialStdin) stream.write(initialStdin);
+    if (endStdin) stream.end();
+    return running;
+  }
+
+  private async writeTempScript(content: string): Promise<string> {
+    const name = `sshmcp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.sh`;
+    const sftp = await this.getSftp();
+    const tryWrite = (full: string) => new Promise<string>((resolve, reject) => {
+      const ws = sftp.createWriteStream(full, { mode: 0o700 });
+      ws.on('error', reject);
+      ws.on('close', () => resolve(full));
+      ws.end(content);
+    });
+    try {
+      return await tryWrite(`/tmp/${name}`);
+    } catch {
+      const home = await this.execute('printf %s "$HOME"', 5000);
+      const dir = (home.stdout || '/tmp').trim() || '/tmp';
+      return await tryWrite(`${dir}/${name}`);
+    }
   }
 
   // ── SFTP Tools ─────────────────────────────────────────

@@ -6,7 +6,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import { ConfigManager } from './config.js';
-import { SshManager, TransferProgress, TransferResult } from './ssh-manager.js';
+import { RunningExec, SshManager, TransferProgress, TransferResult } from './ssh-manager.js';
 
 // Config file in user home dir to survive builds
 const CONFIG_DIR = path.join(os.homedir(), '.ssh-mcp');
@@ -19,36 +19,50 @@ const config = new ConfigManager(CONFIG_PATH);
 // key: server_id (configured) or "host:port" (temporary)
 const pool = new Map<string, SshManager>();
 
-/** Get or auto-establish connection (auto-reconnect on drop) */
-async function getConnection(server_id: string): Promise<{ ssh: SshManager; label: string } | { error: string }> {
+/** Get or auto-establish connection (auto-reconnect on drop).
+ *  username switches the SSH login on the same host and reuses the saved secret.
+ *  That login is pooled separately so the original session stays up. */
+async function getConnection(server_id: string, username?: string): Promise<{ ssh: SshManager; label: string } | { error: string; error_kind: 'auth' | 'connect' | 'config' }> {
+  const saved = config.getServer(server_id);
+  const live = pool.get(server_id);
+  const base = saved ?? live?.connectedServer ?? null;
+  const altUser = Boolean(username && base && username !== base.username);
+  const poolKey = altUser ? `${server_id}@@${username}` : server_id;
+
   // Active connection exists? Reuse it
-  const existing = pool.get(server_id);
+  const existing = pool.get(poolKey);
   if (existing?.isConnected()) {
-    return { ssh: existing, label: `[${server_id}] ` };
+    return { ssh: existing, label: `[${poolKey}] ` };
   }
 
   // Connection dropped, cleanup stale instance
   if (existing) {
     await existing.disconnect().catch(() => {});
-    pool.delete(server_id);
+    pool.delete(poolKey);
   }
 
-  // Try auto-connect from config (or reconnect)
-  const s = config.getServer(server_id);
-  if (!s) return { error: `Server not found and no active connection: ${server_id}\nUse add_server to add, or quick_connect for temporary connection.` };
+  if (!base) return { error: `Server not found and no active connection: ${server_id}\nUse add_server to add, or quick_connect for temporary connection.`, error_kind: 'config' };
+
+  const s = altUser ? { ...base, id: poolKey, username: username! } : base;
 
   const proxy = s.proxy ? config.getProxy(s.proxy) ?? undefined : undefined;
-  if (s.proxy && !proxy) return { error: `Proxy not found: ${s.proxy}. Use add_proxy to add it first.` };
+  if (s.proxy && !proxy) return { error: `Proxy not found: ${s.proxy}. Use add_proxy to add it first.`, error_kind: 'config' };
 
   const jump = s.jumpHost ? config.getServer(s.jumpHost) ?? undefined : undefined;
-  if (s.jumpHost && !jump) return { error: `Jump host not found: ${s.jumpHost}. Use add_server to add it first.` };
+  if (s.jumpHost && !jump) return { error: `Jump host not found: ${s.jumpHost}. Use add_server to add it first.`, error_kind: 'config' };
 
   const ssh = new SshManager();
   const ok = await ssh.connect(s, proxy, jump);
-  if (!ok) return { error: `Connection failed: ${s.name} (${s.host}:${s.port})\nReason: ${ssh.lastError}` };
+  if (!ok) {
+    const kind = ssh.lastErrorKind === 'auth' ? 'auth' : 'connect';
+    const why = kind === 'auth'
+      ? `认证失败: ${s.username}@${s.host}:${s.port}（SSH 通道可达，认证被拒绝）`
+      : `Connection failed: ${s.name} (${s.host}:${s.port})\nReason: ${ssh.lastError}`;
+    return { error: why, error_kind: kind };
+  }
 
-  pool.set(server_id, ssh);
-  return { ssh, label: `[${server_id}] ` };
+  pool.set(poolKey, ssh);
+  return { ssh, label: `[${poolKey}] ` };
 }
 
 // ── Transfer Task Management ────────────────────────────────────────
@@ -68,6 +82,28 @@ interface TransferTask {
 const transfers = new Map<string, TransferTask>();
 let transferCounter = 0;
 
+interface ExecTask {
+  id: string;
+  serverId: string;
+  command: string;
+  status: 'running' | 'done' | 'error';
+  running: RunningExec;
+  startTime: number;
+}
+
+const execTasks = new Map<string, ExecTask>();
+let execCounter = 0;
+
+interface LiveSession {
+  id: string;
+  serverId: string;
+  command: string;
+  running: RunningExec;
+}
+
+const sessions = new Map<string, LiveSession>();
+let sessionCounter = 0;
+
 function newTransferId(): string {
   return `tf_${++transferCounter}`;
 }
@@ -81,6 +117,53 @@ const server = new McpServer({
 
 function text(t: string) {
   return { content: [{ type: 'text' as const, text: t }] };
+}
+
+function jsonText(value: unknown, isError = false) {
+  return { content: [{ type: 'text' as const, text: JSON.stringify(value, null, 2) }], ...(isError ? { isError: true } : {}) };
+}
+
+function execSnapshot(running: RunningExec, extra: Record<string, unknown> = {}) {
+  return {
+    ok: true,
+    exit_code: running.exitCode,
+    stdout: running.stdout,
+    stderr: running.stderr,
+    waiting: !running.closed,
+    ...extra,
+    ...(running.error ? { error: running.error } : {}),
+  };
+}
+
+/** Resolve when the process exits, the timeout elapses, or a PTY goes quiet after output. */
+function waitExec(running: RunningExec, timeoutMs: number, pty: boolean): Promise<'done' | 'timeout' | 'idle'> {
+  const started = Date.now();
+  let lastChange = Date.now();
+  let seen = 0;
+  return new Promise((resolve) => {
+    const timer = setInterval(() => {
+      const size = running.stdout.length + running.stderr.length;
+      if (size !== seen) {
+        seen = size;
+        lastChange = Date.now();
+      }
+      if (running.closed || running.error) {
+        clearInterval(timer);
+        resolve('done');
+        return;
+      }
+      const elapsed = Date.now() - started;
+      if (elapsed >= timeoutMs) {
+        clearInterval(timer);
+        resolve('timeout');
+        return;
+      }
+      if (pty && size > 0 && Date.now() - lastChange >= 800) {
+        clearInterval(timer);
+        resolve('idle');
+      }
+    }, 50);
+  });
 }
 
 function formatSize(bytes: number): string {
@@ -258,23 +341,138 @@ server.tool(
 
 server.tool(
   'execute',
-  'Execute shell command on remote server',
+  'Run a shell command on a remote server. A non-zero remote exit code is still a successful tool call: read exit_code, stdout and stderr. ' +
+    'Newlines in command are kept (a multi-line command is copied to a remote temp script and removed after it exits). ' +
+    'Use script instead of command for multi-line shell or python so you do not have to quote it. ' +
+    'Interactive programs need pty:true; put answers in stdin, one line each, and do not paste them into command. ' +
+    'If the process is still running at timeout (or a PTY has printed a prompt and gone quiet), the result has waiting:true and session_id. Continue with session_write, session_read and session_close. ' +
+    'background:true returns task_id immediately; poll it with transfer_status. ' +
+    'sudo:true runs the command under sudo -S using the password already saved for this server. Do not put that password in command or stdin. With sudo:true and pty:true, stdin is only the program input (for example the new password for passwd). ' +
+    'username logs in as another user on the same host with the saved secret. Each call is a new shell; pass cwd when you need a directory. lc_c defaults to true (LC_ALL=C).',
   {
     server_id: serverIdParam,
-    command: z.string().describe('Command to execute'),
-    timeout: z.number().int().optional().default(30).describe('Timeout in seconds, default 30'),
+    command: z.string().optional().describe('Shell command. Newlines are preserved. Ignored when script is set'),
+    script: z.string().optional().describe('Script body. Written to a remote temp file, executed, then deleted. Use this for multi-line shell or python'),
+    timeout: z.number().int().optional().default(30).describe('Seconds to wait. If the process is still running, the call returns waiting:true instead of failing. Default 30'),
+    pty: z.boolean().optional().describe('Allocate a pseudo-terminal. Required for passwd and other programs that read the terminal. Default false'),
+    stdin: z.string().optional().describe('Data written to stdin, or to the PTY when pty is true. Include the newlines the program expects'),
+    cwd: z.string().optional().describe('Remote working directory for this call only. Does not carry over to the next execute'),
+    lc_c: z.boolean().optional().describe('Set LC_ALL=C before the command so messages are English. Default true'),
+    background: z.boolean().optional().describe('Return task_id immediately. Read output and exit_code later with transfer_status. Default false'),
+    sudo: z.boolean().optional().describe('Run under sudo -S -p \'\' with the password saved on this server. Do not pass the password yourself'),
+    username: z.string().optional().describe('SSH user for this call. Same host, port and saved secret as server_id. Authentication failure is reported as 认证失败'),
   },
-  async ({ server_id, command, timeout }) => {
-    const r = await getConnection(server_id);
-    if ('error' in r) return text(r.error);
-    const { ssh, label } = r;
+  async ({ server_id, command, script, timeout, pty, stdin, cwd, lc_c, background, sudo, username }) => {
+    if ((command == null || command === '') && (script == null || script === '')) {
+      return jsonText({ ok: false, error: 'command or script is required', error_kind: 'config' }, true);
+    }
+    const display = script != null && script !== '' ? '(script)' : (command ?? '');
+    const r = await getConnection(server_id, username);
+    if ('error' in r) return jsonText({ ok: false, error: r.error, error_kind: r.error_kind }, true);
+    const { ssh } = r;
 
-    const { ok, stdout, stderr } = await ssh.execute(command, (timeout ?? 30) * 1000);
-    const status = ok ? 'OK' : 'FAILED';
-    let result = stdout || '';
-    if (stderr) result += `\n[STDERR] ${stderr}`;
-    if (!result.trim()) result = '(no output)';
-    return text(`${label}[${status}] ${command}\n${result}`);
+    const saved = config.getServer(server_id) ?? ssh.connectedServer;
+    let running: RunningExec;
+    try {
+      running = await ssh.startCommand({
+        command,
+        script,
+        pty: pty === true,
+        stdin,
+        cwd,
+        lcC: lc_c !== false,
+        sudo: sudo === true,
+        sudoPassword: sudo ? saved?.password : undefined,
+      });
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      return jsonText({ ok: false, error: message, error_kind: 'channel', command: display }, true);
+    }
+
+    if (background) {
+      const id = `ex_${++execCounter}`;
+      const task: ExecTask = { id, serverId: username ? `${server_id}@@${username}` : server_id, command: display, status: 'running', running, startTime: Date.now() };
+      execTasks.set(id, task);
+      const finish = () => {
+        if (running.error && running.exitCode == null && running.stdout === '' && running.stderr === '') task.status = 'error';
+        else task.status = 'done';
+      };
+      if (running.closed) finish();
+      else {
+        const timer = setInterval(() => {
+          if (running.closed || running.error) {
+            clearInterval(timer);
+            finish();
+          }
+        }, 100);
+      }
+      return jsonText({ ok: true, background: true, task_id: id, command: display });
+    }
+
+    const timeoutMs = (timeout ?? 30) * 1000;
+    const why = await waitExec(running, timeoutMs, pty === true);
+    if (why === 'done') {
+      return jsonText(execSnapshot(running, { command: display, waiting: false }));
+    }
+    const id = `s${++sessionCounter}`;
+    sessions.set(id, { id, serverId: server_id, command: display, running });
+    return jsonText(execSnapshot(running, {
+      command: display,
+      waiting: true,
+      session_id: id,
+      output: running.stdout + (running.stderr ? running.stderr : ''),
+    }));
+  },
+);
+
+server.tool(
+  'session_write',
+  'Write more input to a command that execute left waiting. Include the newline the program expects. Use after execute returns waiting:true.',
+  {
+    session_id: z.string().describe('session_id from execute'),
+    data: z.string().describe('Bytes to write to the PTY or stdin'),
+  },
+  async ({ session_id, data }) => {
+    const s = sessions.get(session_id);
+    if (!s) return jsonText({ ok: false, error: `Session not found: ${session_id}` }, true);
+    if (s.running.closed) return jsonText(execSnapshot(s.running, { session_id, waiting: false, command: s.command }));
+    s.running.write(data);
+    return jsonText({ ok: true, session_id, waiting: true });
+  },
+);
+
+server.tool(
+  'session_read',
+  'Read new output from a waiting command. Returns when something arrives, the process exits, or the short timeout elapses.',
+  {
+    session_id: z.string().describe('session_id from execute'),
+    timeout: z.number().optional().describe('Seconds to wait for output. Default 2'),
+  },
+  async ({ session_id, timeout }) => {
+    const s = sessions.get(session_id);
+    if (!s) return jsonText({ ok: false, error: `Session not found: ${session_id}` }, true);
+    const timeoutMs = Math.max(0, (timeout ?? 2) * 1000);
+    if (!s.running.closed) await waitExec(s.running, timeoutMs, true);
+    if (s.running.closed) sessions.delete(session_id);
+    return jsonText(execSnapshot(s.running, {
+      session_id,
+      command: s.command,
+      output: s.running.stdout + (s.running.stderr ? s.running.stderr : ''),
+    }));
+  },
+);
+
+server.tool(
+  'session_close',
+  'Close a waiting command session and its SSH channel.',
+  { session_id: z.string().describe('session_id from execute') },
+  async ({ session_id }) => {
+    const s = sessions.get(session_id);
+    if (!s) return jsonText({ ok: false, error: `Session not found: ${session_id}` }, true);
+    s.running.close();
+    await waitExec(s.running, 2000, false);
+    sessions.delete(session_id);
+    return jsonText(execSnapshot(s.running, { session_id, command: s.command, waiting: false }));
   },
 );
 
@@ -476,13 +674,33 @@ server.tool(
 
 server.tool(
   'transfer_status',
-  'Check background transfer task progress (use with async_transfer=true)',
+  'Check a background transfer (tf_*) or a background command (ex_* from execute background:true). Leave task_id empty to list both.',
   {
-    task_id: z.string().optional().describe('Task ID, e.g. tf_1. Leave empty to list all tasks'),
+    task_id: z.string().optional().describe('Task ID, e.g. tf_1 or ex_1. Leave empty to list all tasks'),
   },
   async ({ task_id }) => {
+    if (task_id?.startsWith('ex_')) {
+      const job = execTasks.get(task_id);
+      if (!job) return text(`Task not found: ${task_id}`);
+      return jsonText({
+        ok: job.status !== 'error',
+        task_id: job.id,
+        status: job.status,
+        command: job.command,
+        exit_code: job.running.exitCode,
+        stdout: job.running.stdout,
+        stderr: job.running.stderr,
+        ...(job.running.error ? { error: job.running.error } : {}),
+      }, job.status === 'error');
+    }
+
     if (!task_id) {
-      if (transfers.size === 0) return text('No transfer tasks');
+      if (transfers.size === 0 && execTasks.size === 0) return text('No background tasks');
+      const execLines = [...execTasks.values()].map((job) => {
+        const mark = job.status === 'running' ? '🔄' : job.status === 'error' ? '❌' : '✅';
+        const tail = job.running.stdout.trim().split('\n').pop() ?? '';
+        return `  ${job.id} [${job.serverId}] ${mark} ${job.command}${tail ? ` — ${tail}` : ''}`;
+      });
       const lines = [...transfers.values()].map((t) => {
         const dir = t.type === 'download' ? '↓' : '↑';
         const srv = `[${t.serverId}]`;
@@ -494,7 +712,10 @@ server.tool(
           return `  ${t.id} ${srv} ${dir} 🔄 ${formatProgress(t.progress)}`;
         return `  ${t.id} ${srv} ${dir} 🔄 Preparing...`;
       });
-      return text('Transfer tasks:\n' + lines.join('\n'));
+      const chunks: string[] = [];
+      if (execLines.length) chunks.push('Commands:\n' + execLines.join('\n'));
+      if (lines.length) chunks.push('Transfers:\n' + lines.join('\n'));
+      return text(chunks.join('\n'));
     }
 
     const t = transfers.get(task_id);
